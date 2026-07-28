@@ -14,6 +14,12 @@ artifacts, and run the CLI or HTTP server.
 
 The executable `--help` output is the exact source for command-line option spelling and defaults.
 
+## Platform support
+
+NInfer builds and runs on 64-bit Linux. [Windows port](windows-port.md) records what a native
+Windows build requires, how WSL2 and the container image compare as alternatives, which parts of
+the work have landed, and which questions are still open.
+
 ## Model artifacts
 
 | Model | Download | Versioned model card source |

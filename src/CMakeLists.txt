@@ -180,6 +180,12 @@ add_library(ninfer_text STATIC
   text/unicode.cpp
   ${PROJECT_SOURCE_DIR}/third_party/utf8proc/utf8proc.c)
 ninfer_internal_includes(ninfer_text)
+# utf8proc is compiled into this archive rather than linked as a shared library.
+# Without this its header declares every entry point as imported from a DLL, which
+# both rejects the definitions in utf8proc.c and leaves consumers with unresolvable
+# import symbols. PUBLIC because the frontend and tokenizer include the header but
+# compile into ninfer_engine.
+target_compile_definitions(ninfer_text PUBLIC UTF8PROC_STATIC)
 
 add_library(ninfer_media_decode STATIC
   media/decode/decode.cpp)

@@ -14,7 +14,11 @@
 #include <system_error>
 #include <utility>
 
-#include <unistd.h>
+#ifdef _WIN32
+#    include <process.h>
+#else
+#    include <unistd.h>
+#endif
 
 namespace ninfer::serve {
 namespace {
@@ -30,8 +34,12 @@ std::uint64_t unix_time_ms() {
 std::string new_server_instance_id() {
     const auto now    = std::chrono::system_clock::now().time_since_epoch();
     const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(now).count();
-    return "serve-" + std::to_string(static_cast<long long>(::getpid())) + '-' +
-           std::to_string(micros);
+#ifdef _WIN32
+    const auto pid = static_cast<long long>(::_getpid());
+#else
+    const auto pid = static_cast<long long>(::getpid());
+#endif
+    return "serve-" + std::to_string(pid) + '-' + std::to_string(micros);
 }
 
 std::filesystem::path normalized_absolute_path(const std::string& value) {
@@ -398,7 +406,9 @@ JsonlRequestLog::JsonlRequestLog(const std::string& path,
         throw std::invalid_argument("request JSONL log must not overwrite the model artifact");
     }
     server_instance_id_ = new_server_instance_id();
-    output_.open(path_, std::ios::out | std::ios::app);
+    // Binary mode keeps every record byte-identical across hosts. Text mode would
+    // translate the record terminator on platforms that distinguish the two.
+    output_.open(path_, std::ios::out | std::ios::app | std::ios::binary);
     if (!output_) {
         throw std::runtime_error("failed to open request JSONL log for append: " + path_);
     }

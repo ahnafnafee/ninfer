@@ -25,14 +25,14 @@ cross-target comparisons.
 
 - MTP0 at a 7,680-token prompt: **15,544.3 prefill tok/s** and **271.1 decode tok/s**.
 - MTP0 at a 260,096-token prompt: **5,157.1 prefill tok/s** and **188.2 decode tok/s**.
-- MTP3 long reasoning: **584.0–695.1 decode tok/s** with **72.4–83.3% acceptance**.
+- MTP3 long reasoning: **584.0-695.1 decode tok/s** with **72.4-83.3% acceptance**.
 - MTP3 structured output: **714.3 decode tok/s**, **87.7% acceptance**, and **3.63 tokens/round**.
 
 **Qwen3.6-27B**
 
 - MTP0 at a 7,680-token prompt: **3,218.1 prefill tok/s** and **77.6 decode tok/s**.
 - MTP0 at a 260,096-token prompt: **1,614.8 prefill tok/s** and **54.8 decode tok/s**.
-- MTP3 long reasoning: **161.9–175.4 decode tok/s** with **73.4–78.8% acceptance**.
+- MTP3 long reasoning: **161.9-175.4 decode tok/s** with **73.4-78.8% acceptance**.
 - MTP3 structured output: **193.0 decode tok/s**, **88.7% acceptance**, and **3.66 tokens/round**.
 
 See [Performance](docs/performance.md) for the full methodology, variability, reproduction command,
@@ -68,6 +68,10 @@ NInfer currently requires:
 
 The build rejects CUDA architectures other than `120a`. There is no install target or packaged
 binary distribution; NInfer is run from its source build tree.
+
+Windows is not a supported host today. See the [Windows port](docs/windows-port.md) notes for the
+remaining native-build work and for the WSL2 and container alternatives that run the Linux build
+unchanged.
 
 ## Build
 
