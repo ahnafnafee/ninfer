@@ -321,6 +321,44 @@ A completion means it works. An `invalid_api_key` body also means the network pa
 the key is wrong. A timeout means no host-side proxy is listening, or a firewall is dropping the
 connection before it reaches one.
 
+## Switching between the two models
+
+One artifact per process, and both sets of weights (20.56 + 16.01 GiB) exceed a 32 GiB card, so the
+two targets cannot run at once. Swap instead. A wrapper keeps it to one command:
+
+```bash
+#!/usr/bin/env bash
+# ninfer-switch 27b|35b
+set -eu
+case "${1:-}" in
+  27b) ART=qwen3_6_27b.ninfer;     ID=qwen3.6-27b ;;
+  35b) ART=qwen3_6_35b_a3b.ninfer; ID=qwen3.6-35b-a3b ;;
+  *) echo "usage: ninfer-switch 27b|35b"; exit 1 ;;
+esac
+PORT=9011
+p=$(ps -eo pid,comm --no-headers | awk '$2=="ninfer-serve"{print $1}')
+[ -n "$p" ] && kill $p
+for _ in $(seq 1 30); do ss -ltn 2>/dev/null | grep -q ":$PORT " || break; sleep 1; done
+export LD_LIBRARY_PATH="$HOME/lib"
+setsid nohup "$HOME/bin/ninfer-serve" "$HOME/models/$ART" \
+  --model-id "$ID" --host 127.0.0.1 --port "$PORT" \
+  --api-key "${NINFER_KEY:-changeme}" \
+  --max-context "${NINFER_CTX:-262144}" --kv-dtype int8 \
+  --spec mtp --draft-tokens 3 --lm-head-draft \
+  </dev/null >"$HOME/serve.log" 2>&1 &
+for _ in $(seq 1 60); do
+  ss -ltn 2>/dev/null | grep -q ":$PORT " && { echo "serving $ID on $PORT"; exit 0; }
+  sleep 1
+done
+echo "failed to start; see ~/serve.log"; exit 1
+```
+
+Takes about 40 seconds, almost all of it weight upload. Clients must send the `--model-id` it
+prints; the server rejects any other `model` value.
+
+The wait-for-port loop is not optional. A new server started immediately after killing the old one
+fails with `failed to bind`, because the socket has not been released yet.
+
 ## Gotchas
 
 **Thinking is on by default, and it consumes the output budget.** A small `max_tokens` can be spent
@@ -343,6 +381,19 @@ kill $(ps -eo pid,comm --no-headers | awk '$2=="ninfer-serve"{print $1}')
 ```
 
 **Do not put the artifact on `/mnt/c`.** See the note near the top.
+
+**Tool names are capped at 64 characters on the OpenAI route** (`src/serve/openai_schema.cpp`),
+and at 128 on the Anthropic route (`src/serve/anthropic_schema.cpp`). Both allow only
+`[A-Za-z0-9_-]`. This matches OpenAI's own specification, so a client sending longer names is
+off-spec, but the failure reads as an opaque `400 function name must match [A-Za-z0-9_-]{1,64}`
+that does not say which tool is at fault, and the request log records `tool_count` but not names.
+Agent clients that namespace tools with a repeated plugin prefix hit this easily. Either drop the
+offending tool sources, shorten the prefix, or use `/v1/messages` for the larger budget.
+
+**Under mirrored networking, WSL and Windows share a port space.** A port claimed by a Windows
+process, including one `tailscale serve` is publishing, cannot then be bound inside WSL. Give the
+server its own internal port and let the proxy map the public one, rather than using the same
+number on both sides.
 
 ## Related
 
