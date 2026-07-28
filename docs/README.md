@@ -20,6 +20,7 @@ NInfer builds and runs on 64-bit Linux and is compiled for one GPU architecture.
 
 | Document | Purpose |
 |---|---|
+| [Windows quickstart](windows-quickstart.md) | runbook for getting either artifact serving from a Windows machine, including downloads, ports, and remote access |
 | [Windows port](windows-port.md) | native Windows build requirements, WSL2 and container alternatives, landed work, and open questions |
 | [GPU portability](gpu-portability.md) | what the `sm_120a` target actually consists of, the device code's real instruction requirements, and what retargeting to another architecture would cost |
 
