@@ -34,8 +34,8 @@ cost is concentrated in one class rewrite, dependency discovery, and toolchain c
 | Produces an executable for Windows | yes | no | no |
 | GPU access | direct, WDDM | paravirtualized | paravirtualized |
 | Pinned host memory | full | documented as limited | documented as limited |
-| Unbuffered artifact read | must be reimplemented on Win32 | works on ext4 | works on ext4 |
-| Performance against published results | unmeasured | unmeasured | unmeasured |
+| Unbuffered artifact read | must be reimplemented on Win32 | works on ext4, about 4 GiB/s | works on ext4 |
+| Performance against published results | unmeasured | measured at or above baseline | not separately measured |
 
 Native MSVC is the right route when a Windows executable is the deliverable, when Windows-side
 profiling is needed, or when the engine has to be embedded in a Windows application. Otherwise WSL2
@@ -55,7 +55,71 @@ before publishing instructions.
 Docker Desktop's WSL2 backend includes the NVIDIA container runtime, so `--gpus` works without
 installing the container toolkit separately. The `Dockerfile` disables `BUILD_TESTING`,
 `NINFER_BUILD_BENCHMARKS`, and `NINFER_BUILD_TOOLS`, so it produces the two applications and
-nothing else.
+nothing else. Docker Desktop's per-distro WSL integration is off by default; without it the `docker`
+CLI inside a WSL distro is the Windows binary and cannot bind-mount that distro's paths, so either
+enable the integration or keep the artifact in a Docker volume.
+
+### Measured WSL2 results
+
+Both registered targets were run under WSL2 on Ubuntu 24.04 against an RTX 5090 with the desktop
+attached, using the committed `examples/cli/` fixtures and the `docs/performance.md` server
+settings: max context 262,144, prefill chunk 1,024, INT8 group-64 KV, CUDA Graph on, prefix reuse
+off, temperature 0.6 / top-p 0.95 / top-k 20 / presence penalty 1.0. Each phase discards a warm-up.
+Metrics come from the server's own request JSONL phase timings using the formulas that document
+specifies. Both artifacts were SHA-256 verified against the README before running, and both passed
+the `text_smoke_zh` correctness oracle with the expected exact output.
+
+**Qwen3.6-35B-A3B**
+
+| Fixture | Metric | WSL2 | Published | Ratio |
+|---|---|---|---|---|
+| `long_niah_8k` (7,680 tok, MTP0) | prefill | 16,203-16,222 tok/s | 15,544.3 | 104% |
+| `long_niah_8k` (7,680 tok, MTP0) | decode | 296.8-303.6 tok/s | 271.1 | 110-112% |
+| `long_niah_256k` (260,096 tok, MTP0) | prefill | 5,137.6 tok/s | 5,157.1 | 99.6% |
+| `long_niah_256k` (260,096 tok, MTP0) | decode | 194.5 tok/s | 188.2 | 103% |
+| `scenario_structured_jsonl` (MTP3) | decode | 762.0 tok/s | 714.3 | 107% |
+| `scenario_structured_jsonl` (MTP3) | acceptance | 95.6% | 87.7% | above |
+| `long_decode_aime26_01` (MTP3) | decode | 657.3 tok/s | 584.0-695.1 | within range |
+| `long_decode_aime26_01` (MTP3) | acceptance | 79.5% | 72.4-83.3% | within range |
+
+**Qwen3.6-27B**
+
+| Fixture | Metric | WSL2 | Published | Ratio |
+|---|---|---|---|---|
+| `long_niah_8k` (7,680 tok, MTP0) | prefill | 3,272-3,298 tok/s | 3,218.1 | 102% |
+| `long_niah_8k` (7,680 tok, MTP0) | decode | 79.8-79.9 tok/s | 77.6 | 103% |
+| `long_niah_256k` (260,096 tok, MTP0) | prefill | 1,631.4 tok/s | 1,614.8 | 101% |
+| `long_niah_256k` (260,096 tok, MTP0) | decode | 56.8 tok/s | 54.8 | 104% |
+| `scenario_structured_jsonl` (MTP3) | decode | 202.5 tok/s | 193.0 | 105% |
+| `scenario_structured_jsonl` (MTP3) | acceptance | 96.4% | 88.7% | above |
+| `long_decode_aime26_01` (MTP3) | decode | 175.2 tok/s | 161.9-175.4 | top of range |
+| `long_decode_aime26_01` (MTP3) | acceptance | 79.4% | 73.4-78.8% | slightly above |
+
+The full 262,144-token context fits on a 32 GiB card with the desktop attached, for both targets:
+
+| Target | Mode | Weights | Sequence (KV payload) | Workspace | Total reserved |
+|---|---|---:|---:|---:|---:|
+| 35B-A3B | MTP0 | 19.59 GiB | 2.70 (2.58) GiB | 0.12 GiB | 22.41 GiB |
+| 35B-A3B | MTP3 | 20.56 GiB | 3.14 (2.84) GiB | 0.12 GiB | 23.82 GiB |
+| 27B | MTP0 | 15.25 GiB | 8.55 (8.25) GiB | 0.17 GiB | 23.97 GiB |
+| 27B | MTP3 | 16.01 GiB | 9.50 (8.77) GiB | 0.17 GiB | 25.67 GiB |
+
+The 27B carries lighter weights but a KV cache more than three times larger, because it has more
+full-attention layers and more KV heads than the sparse target. See
+[GPU portability](gpu-portability.md) for the per-token KV derivation. Artifact load ran at 3.3 to
+4.1 GiB/s through the unbuffered read path on ext4, so server start including weight upload was
+about 5 seconds in every configuration.
+
+Read these as evidence that WSL2 imposes no visible penalty at these fixtures, not as a
+recalibration of the published numbers. The runs used fewer seeds than the published five-seed
+protocol and report per-run values rather than mean and deviation; the tested revision and driver
+differ from those the performance document records; and the structured fixture reaches its output
+cap rather than stopping naturally, which likely inflates its acceptance figure. The margins above
+100% are therefore not attributable to WSL2 being faster than bare Linux.
+
+None of this constrains the native Windows question. WSL2's paravirtualized GPU path is not the
+Windows display driver model, so the residency question in the open-questions section below remains
+entirely untested.
 
 ## Toolchain prerequisites
 
@@ -444,8 +508,9 @@ These are not resolved and should not be presented as if they were.
 5. **Whether unbuffered reads short-read cleanly at end of file** on both 512-byte-emulated and
    native 4K volume geometries. Every model load exercises this.
 6. **Whether the direct-I/O flag on a Windows drive mount inside WSL** returns an error or is
-   silently ignored. Decides whether WSL instructions must forbid model files on mounted Windows
-   drives.
+   silently ignored. The ext4 case is settled: the artifact loads at roughly 4 GiB/s from the WSL
+   filesystem, so the unbuffered path works there. The mounted-drive case is still untested, and it
+   decides only whether the instructions must forbid model files on a Windows drive.
 7. **Whether the pinned CMake version accepts the architecture feature suffix.** The build hard-errors
    on any other architecture value, so if the suffix misbehaves that guard must be relaxed before the
    problem can even be bisected. A related claim, that the suffix raises the shared-memory ceiling,

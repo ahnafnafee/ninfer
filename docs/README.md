@@ -16,9 +16,12 @@ The executable `--help` output is the exact source for command-line option spell
 
 ## Platform support
 
-NInfer builds and runs on 64-bit Linux. [Windows port](windows-port.md) records what a native
-Windows build requires, how WSL2 and the container image compare as alternatives, which parts of
-the work have landed, and which questions are still open.
+NInfer builds and runs on 64-bit Linux and is compiled for one GPU architecture.
+
+| Document | Purpose |
+|---|---|
+| [Windows port](windows-port.md) | native Windows build requirements, WSL2 and container alternatives, landed work, and open questions |
+| [GPU portability](gpu-portability.md) | what the `sm_120a` target actually consists of, the device code's real instruction requirements, and what retargeting to another architecture would cost |
 
 ## Model artifacts
 
