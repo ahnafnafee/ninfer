@@ -201,6 +201,21 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 The server also implements Anthropic Messages, streaming, token counting, multimodal input, and
 function-tool request/response translation. See [HTTP serving](docs/serving.md).
 
+### Switching models or shutting down
+
+NInfer loads one model per process; there is no runtime hot-swap. For local development on WSL,
+the [`tools/ninfer-switch`](tools/ninfer-switch) script handles the stop-and-restart cycle:
+
+```bash
+wsl ~/bin/ninfer-switch 27b    # switch to Qwen3.6-27B
+wsl ~/bin/ninfer-switch 35b    # switch to Qwen3.6-35B-A3B
+wsl ~/bin/ninfer-switch kill   # shut down the server
+```
+
+It kills the running `ninfer-serve`, waits for the port to free, and starts the new model on
+port 9011 with the same tuning (MTP speculative decoding, INT8 KV cache, full context). Copy or
+symlink `tools/ninfer-switch` into your `~/bin/` for convenience.
+
 ## Capabilities
 
 Both registered artifacts support:

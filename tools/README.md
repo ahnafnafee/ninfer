@@ -20,6 +20,7 @@ for the selected tool.
 | Compare 27B reference/C++/source activations | [`parity/qwen3_6_27b/`](parity/qwen3_6_27b/README.md) |
 | Run benchmark matrices | [`bench/`](bench/README.md) |
 | Exercise a resident HTTP server | [`smoke/serve_contract.py`](smoke/serve_contract.py) |
+| Switch or stop a local server | [`ninfer-switch`](ninfer-switch) |
 
 ## Artifact workflow
 
@@ -96,3 +97,18 @@ python3 -m tools.smoke.serve_contract \
 
 The client exercises OpenAI, Anthropic, streaming, usage, multimodal, and tool-call response
 surfaces against the resident process.
+
+## Server switching
+
+`ninfer-switch` is a bash utility for local development that stops the current `ninfer-serve`
+process and starts a new one with a different model on port 9011:
+
+```bash
+wsl ~/bin/ninfer-switch 27b    # switch to Qwen3.6-27B
+wsl ~/bin/ninfer-switch 35b    # switch to Qwen3.6-35B-A3B
+wsl ~/bin/ninfer-switch kill   # shut down the server
+```
+
+It requires the WSL environment where `ninfer-serve`, the model artifacts under `~/models/`, and
+`LD_LIBRARY_PATH=~/lib` are set up. The repo copy under `tools/` is the source of truth; symlink or
+copy it into `~/bin/` for convenience.

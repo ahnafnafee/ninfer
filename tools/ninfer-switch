@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# ninfer-switch 27b|35b|kill   -- swap model or shut down on port 9011
+set -eu
+
+PORT=9011
+
+case "${1:-}" in
+  27b) ART=qwen3_6_27b.ninfer;      ID=qwen3.6-27b ;;
+  35b) ART=qwen3_6_35b_a3b.ninfer;  ID=qwen3.6-35b-a3b ;;
+  kill)
+    p=$(ps -eo pid,comm --no-headers | awk '$2=="ninfer-serve"{print $1}')
+    if [ -n "$p" ]; then
+      kill "$p"
+      for _ in $(seq 1 30); do ss -ltn 2>/dev/null | grep -q ":$PORT " || break; sleep 1; done
+      echo "stopped ninfer-serve"
+    else
+      echo "no ninfer-serve running"
+    fi
+    exit 0
+    ;;
+  *) echo "usage: ninfer-switch 27b|35b|kill"; exit 1 ;;
+esac
+
+p=$(ps -eo pid,comm --no-headers | awk '$2=="ninfer-serve"{print $1}')
+[ -n "$p" ] && kill "$p"
+for _ in $(seq 1 30); do ss -ltn 2>/dev/null | grep -q ":$PORT " || break; sleep 1; done
+
+export LD_LIBRARY_PATH="$HOME/lib"
+setsid nohup "$HOME/bin/ninfer-serve" "$HOME/models/$ART" \
+  --model-id "$ID" --host 127.0.0.1 --port "$PORT" \
+  --api-key "${NINFER_KEY:-ninfer-test-key}" \
+  --max-context "${NINFER_CTX:-262144}" --kv-dtype int8 \
+  --spec mtp --draft-tokens 3 --lm-head-draft \
+  --request-log-jsonl "$HOME/serve.jsonl" \
+  </dev/null >"$HOME/serve.log" 2>&1 &
+
+for _ in $(seq 1 60); do
+  ss -ltn 2>/dev/null | grep -q ":$PORT " && { echo "serving $ID on $PORT"; exit 0; }
+  sleep 1
+done
+echo "failed to start; see ~/serve.log"; tail -3 "$HOME/serve.log"; exit 1
