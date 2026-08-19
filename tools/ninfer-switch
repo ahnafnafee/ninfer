@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
-# ninfer-switch 27b|38|38u|35b|kill   -- swap model or shut down on port 9011
+# ninfer-switch 27b|38|38u|35b|kill   -- swap model or shut down
+#
+# Defaults match the live deployment so that swapping a model does not strand a
+# client pointed at it. Override with NINFER_PORT / NINFER_HOST / NINFER_KEY.
+# An API key is sent only when NINFER_KEY is set.
 set -eu
 
-PORT=9011
+PORT="${NINFER_PORT:-18020}"
+HOST="${NINFER_HOST:-0.0.0.0}"
 
 case "${1:-}" in
   27b) ART=qwen3_6_27b.ninfer;      ID=qwen3.6-27b ;;
@@ -29,9 +34,10 @@ for _ in $(seq 1 30); do ss -ltn 2>/dev/null | grep -q ":$PORT " || break; sleep
 
 export LD_LIBRARY_PATH="$HOME/lib"
 setsid nohup "$HOME/bin/ninfer-serve" "$HOME/models/$ART" \
-  --model-id "$ID" --host 127.0.0.1 --port "$PORT" \
-  --api-key "${NINFER_KEY:-ninfer-test-key}" \
-  --max-context "${NINFER_CTX:-262144}" --kv-dtype int8 \
+  --model-id "$ID" --host "$HOST" --port "$PORT" \
+  ${NINFER_KEY:+--api-key "$NINFER_KEY"} \
+  --max-context "${NINFER_CTX:-262144}" --kv-capacity auto --kv-dtype int8 \
+  --default-max-tokens "${NINFER_MAXTOK:-262144}" --cors \
   --spec mtp --draft-tokens 3 --lm-head-draft \
   --request-log-jsonl "$HOME/serve.jsonl" \
   </dev/null >"$HOME/serve.log" 2>&1 &
