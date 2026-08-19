@@ -1,49 +1,103 @@
 #!/usr/bin/env bash
-# ninfer-switch 27b|38|38u|35b|kill   -- swap model or shut down
+# ninfer-switch 27b|38|38u|35b|status|kill   -- swap model, report state, or stop
 #
-# Defaults match the live deployment so that swapping a model does not strand a
-# client pointed at it. Override with NINFER_PORT / NINFER_HOST / NINFER_KEY.
-# An API key is sent only when NINFER_KEY is set.
+# The server runs as the ninfer-serve user unit, so this drives systemd rather
+# than starting its own copy. Killing the process directly would read as a
+# failure and systemd would restart it with the unit's own model, fighting
+# whatever this script had just launched.
+#
+# The model choice lives in the unit's EnvironmentFile so it survives restarts
+# and reboots. Override the port with NINFER_PORT.
 set -eu
 
+UNIT=ninfer-serve.service
+ENVFILE="$HOME/.config/ninfer/model.env"
 PORT="${NINFER_PORT:-18020}"
-HOST="${NINFER_HOST:-0.0.0.0}"
+
+report_status() {
+  local active
+  active=$(systemctl --user is-active "$UNIT" 2>/dev/null || true)
+  echo "unit      : $UNIT ($active$(systemctl --user is-enabled "$UNIT" 2>/dev/null | sed 's/^/, /'))"
+
+  if [ "$active" = "active" ]; then
+    echo "since     : $(systemctl --user show "$UNIT" -p ActiveEnterTimestamp --value 2>/dev/null)"
+    echo "main pid  : $(systemctl --user show "$UNIT" -p MainPID --value 2>/dev/null)"
+  fi
+
+  if [ -f "$ENVFILE" ]; then
+    # shellcheck disable=SC1090
+    . "$ENVFILE"
+    echo "artifact  : ${ARTIFACT:-unset}"
+    echo "model id  : ${MODEL_ID:-unset}"
+  else
+    echo "artifact  : no $ENVFILE"
+  fi
+
+  if ss -ltn 2>/dev/null | grep -q ":$PORT "; then
+    echo "port      : $PORT listening"
+    local served
+    served=$(curl -s --max-time 5 "http://127.0.0.1:$PORT/v1/models" 2>/dev/null |
+             grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4 || true)
+    echo "serving   : ${served:-no response}"
+  else
+    echo "port      : $PORT NOT listening"
+  fi
+
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    echo "gpu       : $(nvidia-smi --query-gpu=memory.used,memory.free --format=csv,noheader 2>/dev/null | head -1)"
+  fi
+
+  # The distro is torn down when nothing holds it open, which stops the unit
+  # without it ever failing. Worth seeing next to the service state.
+  echo "keepalive : $(command -v powershell.exe >/dev/null 2>&1 &&
+      powershell.exe -NoProfile -Command "(Get-ScheduledTask -TaskName 'WSL-Ubuntu-Keepalive').State" 2>/dev/null |
+      tr -d '\r' || echo unknown)"
+
+  local errs
+  errs=$(grep -c "error" "$HOME/serve.log" 2>/dev/null || echo 0)
+  echo "log errors: $errs in ~/serve.log"
+}
 
 case "${1:-}" in
-  27b) ART=qwen3_6_27b.ninfer;      ID=qwen3.6-27b ;;
-  38)  ART=qwen3_8_27b.ninfer;      ID=qwen3.8-27b ;;
-  38u) ART=qwen3_8_27b_uncensored.ninfer; ID=qwen3.8-27b-heretic ;;
-  35b) ART=qwen3_6_35b_a3b.ninfer;  ID=qwen3.6-35b-a3b ;;
-  kill)
-    p=$(ps -eo pid,comm --no-headers | awk '$2=="ninfer-serve"{print $1}')
-    if [ -n "$p" ]; then
-      kill "$p"
-      for _ in $(seq 1 30); do ss -ltn 2>/dev/null | grep -q ":$PORT " || break; sleep 1; done
-      echo "stopped ninfer-serve"
-    else
-      echo "no ninfer-serve running"
-    fi
+  27b) ART="$HOME/models/qwen3_6_27b.ninfer";            ID=qwen3.6-27b ;;
+  38)  ART="$HOME/models/qwen3_8_27b.ninfer";            ID=qwen3.8-27b ;;
+  38u) ART="$HOME/models/qwen3_8_27b_uncensored.ninfer"; ID=qwen3.8-27b-heretic ;;
+  35b) ART="$HOME/models/qwen3_6_35b_a3b.ninfer";        ID=qwen3.6-35b-a3b ;;
+  status)
+    report_status
     exit 0
     ;;
-  *) echo "usage: ninfer-switch 27b|38|38u|35b|kill"; exit 1 ;;
+  kill)
+    systemctl --user stop "$UNIT"
+    for _ in $(seq 1 30); do ss -ltn 2>/dev/null | grep -q ":$PORT " || break; sleep 1; done
+    echo "stopped $UNIT"
+    exit 0
+    ;;
+  *) echo "usage: ninfer-switch 27b|38|38u|35b|status|kill"; exit 1 ;;
 esac
 
-p=$(ps -eo pid,comm --no-headers | awk '$2=="ninfer-serve"{print $1}')
-[ -n "$p" ] && kill "$p"
-for _ in $(seq 1 30); do ss -ltn 2>/dev/null | grep -q ":$PORT " || break; sleep 1; done
+if [ ! -f "$ART" ]; then
+  echo "artifact not found: $ART" >&2
+  exit 1
+fi
 
-export LD_LIBRARY_PATH="$HOME/lib"
-setsid nohup "$HOME/bin/ninfer-serve" "$HOME/models/$ART" \
-  --model-id "$ID" --host "$HOST" --port "$PORT" \
-  ${NINFER_KEY:+--api-key "$NINFER_KEY"} \
-  --max-context "${NINFER_CTX:-262144}" --kv-capacity auto --kv-dtype int8 \
-  --default-max-tokens "${NINFER_MAXTOK:-262144}" --cors \
-  --spec mtp --draft-tokens 3 --lm-head-draft \
-  --request-log-jsonl "$HOME/serve.jsonl" \
-  </dev/null >"$HOME/serve.log" 2>&1 &
+mkdir -p "$(dirname "$ENVFILE")"
+cat > "$ENVFILE" <<EOF
+# Written by ninfer-switch. The unit reads this, so the choice survives restarts.
+ARTIFACT=$ART
+MODEL_ID=$ID
+EOF
 
-for _ in $(seq 1 60); do
-  ss -ltn 2>/dev/null | grep -q ":$PORT " && { echo "serving $ID on $PORT"; exit 0; }
+systemctl --user restart "$UNIT"
+
+for _ in $(seq 1 120); do
+  if ss -ltn 2>/dev/null | grep -q ":$PORT "; then
+    echo "serving $ID on $PORT"
+    exit 0
+  fi
   sleep 1
 done
-echo "failed to start; see ~/serve.log"; tail -3 "$HOME/serve.log"; exit 1
+
+echo "failed to start; see ~/serve.log" >&2
+systemctl --user status "$UNIT" --no-pager 2>/dev/null | head -5
+exit 1
