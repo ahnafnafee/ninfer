@@ -3,8 +3,8 @@
 NInfer currently builds and runs on 64-bit Linux. This document records what a native Windows build
 requires, what the alternatives are, and which parts of the work are done.
 
-The porting surface is small. Of 441 first-party sources, only three ever reached for POSIX
-interfaces, and one of those is already handled. Outside `third_party/` there are no GCC or Clang
+The porting surface is small. Of 597 first-party sources, only four ever reach for POSIX
+interfaces, and three of those are already handled. Outside `third_party/` there are no GCC or Clang
 host-compiler extensions and no use of the C++20 features that MSVC and nvcc handle poorly. The
 cost is concentrated in one class rewrite, dependency discovery, and toolchain configuration.
 
@@ -15,6 +15,7 @@ cost is concentrated in one class rewrite, dependency discovery, and toolchain c
 | `ninfer_text` static-linkage define | landed |
 | Media-root containment guard | landed |
 | Serve process-id and log stream mode | landed |
+| Load-progress TTY detection | not started |
 | Toolchain prerequisites | not started |
 | Dependency discovery (FFmpeg, libcurl) | not started |
 | MSVC compile flags and presets | not started |
@@ -416,6 +417,11 @@ None of these block the build, but all three affect whether the port looks corre
   garbled interactively. Display only; redirected output is correct once binary mode is set.
 - Command-line arguments arrive in the active code page, so a non-ASCII artifact or messages path is
   lossily converted before reaching `std::filesystem::path`.
+- `src/product/load_progress/load_progress.cpp:3,63` includes `<unistd.h>` and calls
+  `::isatty(STDERR_FILENO)` to decide whether the weight-load progress line redraws in place or
+  prints one record per update. Neither the header nor the constant exists under MSVC; the
+  equivalent is `_isatty(_fileno(stderr))` from `<io.h>`. This is the only POSIX include outside the
+  three sites already handled, and it is a compile error rather than a behavior difference.
 
 An application manifest declaring UTF-8 as the active code page fixes all three with no code change,
 and also defuses a latent hazard in the reader error paths at `src/artifact/reader.cpp:178`, `:186`,

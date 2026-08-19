@@ -120,18 +120,33 @@ ldd ~/bin/ninfer-serve | grep 'not found'   # expect no output
 ~/bin/ninfer-serve --help | head -2
 ```
 
+The library closure is a one-time cost, not a per-build one. Rebuilding for a newer engine only
+replaces the two binaries in `~/bin`; the staged `~/lib` continues to satisfy them, because the
+runtime image's FFmpeg and libcurl majors are what the closure was cut from. Re-run the `not found`
+check after any rebuild anyway, since a base-image bump is exactly the change that would invalidate
+it. Keep the previous binaries alongside the new ones under a distinguishing suffix so a bad build
+can be backed out without a rebuild.
+
 ## Downloading an artifact
 
-Both artifacts are public and need no authentication.
+All five artifacts are public and need no authentication.
 
 | Model | File | Size (bytes) | SHA-256 |
 |---|---|---:|---|
-| Qwen3.6-27B | `qwen3_6_27b.ninfer` | 17,495,365,888 | `74fac75f3a6b7ab7b52e08c36969c7a33a8ba23465910eccd72d195adb497127` |
-| Qwen3.6-35B-A3B | `qwen3_6_35b_a3b.ninfer` | 22,783,246,080 | `5194407dd6d3092b8c2f81ce41e014b50ca0d6f1ba4e5d8c1492b8652bfa267f` |
+| Qwen3.6-27B | `qwen3_6_27b.ninfer` | 17,495,365,888 | `7b51600ffd10632b9660f56085efdd9b751d79733ad32036a652234b64bebe7b` |
+| Qwen3.6-27B NVFP4 | `qwen3_6_27b_nvfp4.ninfer` | 18,324,064,000 | `bce5f00d066c0f20f1317bf1fdcb458264cf95837c3b1f3fbec163694627893a` |
+| Qwen3.8-27B | `qwen3_8_27b.ninfer` | 18,210,531,328 | `eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e` |
+| Qwen3.8-27B NVFP4 | `qwen3_8_27b_nvfp4.ninfer` | 21,492,695,040 | `bb3360522a06e136e0367f5703414d26272b7285c8a6ab6194135c17dbd81b32` |
+| Qwen3.6-35B-A3B | `qwen3_6_35b_a3b.ninfer` | 22,783,246,080 | `1fb9ea0b5b8561e49d9604115ec89e5d9f2b6f6434e32c37c57fffd480a325d2` |
 
-The URL pattern is
-`https://huggingface.co/neroued/<REPO>/resolve/main/<FILE>`, with repositories
-`Qwen3.6-27B-NInfer` and `Qwen3.6-35B-A3B-NInfer`.
+The URL pattern is `https://huggingface.co/neroued/<REPO>/resolve/main/<FILE>`, with repositories
+`Qwen3.6-27B-NInfer`, `Qwen3.6-27B-nvfp4-NInfer`, `Qwen3.8-27B-NInfer`,
+`Qwen3.8-27B-nvfp4-NInfer`, and `Qwen3.6-35B-A3B-NInfer`.
+
+The project README is the authority for this table; check it before trusting these hashes, because
+the container format has been revised once and the version-2 rewrite changed every artifact's
+digest without changing its weights. A file whose size matches but whose hash does not is most
+likely a version-1 download that needs the migration described in the README.
 
 **Use a chunked or parallel downloader, not a single-stream `curl -O`.** A single connection was
 observed dropping repeatedly against the CDN and restarting from byte zero, making no net progress
@@ -321,19 +336,21 @@ A completion means it works. An `invalid_api_key` body also means the network pa
 the key is wrong. A timeout means no host-side proxy is listening, or a firewall is dropping the
 connection before it reaches one.
 
-## Switching between the two models
+## Switching between models
 
-One artifact per process, and both sets of weights (20.56 + 16.01 GiB) exceed a 32 GiB card, so the
-two targets cannot run at once. Swap instead. A wrapper keeps it to one command:
+One artifact per process, and any two sets of weights exceed a 32 GiB card, so the targets cannot
+run at once. Swap instead. A wrapper keeps it to one command; the maintained copy lives at
+`tools/ninfer-switch` in the repository, and the listing below is the shape of it:
 
 ```bash
 #!/usr/bin/env bash
-# ninfer-switch 27b|35b
+# ninfer-switch 27b|38|35b
 set -eu
 case "${1:-}" in
   27b) ART=qwen3_6_27b.ninfer;     ID=qwen3.6-27b ;;
+  38)  ART=qwen3_8_27b.ninfer;     ID=qwen3.8-27b ;;
   35b) ART=qwen3_6_35b_a3b.ninfer; ID=qwen3.6-35b-a3b ;;
-  *) echo "usage: ninfer-switch 27b|35b"; exit 1 ;;
+  *) echo "usage: ninfer-switch 27b|38|35b"; exit 1 ;;
 esac
 PORT=9011
 p=$(ps -eo pid,comm --no-headers | awk '$2=="ninfer-serve"{print $1}')
@@ -381,6 +398,17 @@ kill $(ps -eo pid,comm --no-headers | awk '$2=="ninfer-serve"{print $1}')
 ```
 
 **Do not put the artifact on `/mnt/c`.** See the note near the top.
+
+**Another GPU tenant can make the load fail late, after the weights are already resident.** The
+engine sizes its runtime reservation against free device memory at startup, so a 27B artifact that
+uploads its weights fine can still abort with `requested Engine runtime reservation requires N
+bytes, but only 0 bytes are available for runtime capacity`. On a 32 GiB card, roughly 15.9 GiB of
+weights plus the KV cache and workspace plan for about 17.4 GiB, which leaves very little room for a
+second resident workload. Ollama, a training container, and the Windows desktop compositor all
+qualify. Check `nvidia-smi --query-gpu=memory.used,memory.free --format=csv` before blaming the
+artifact, and note the same contention depresses decode throughput well below the published figures
+without failing outright. `--kv-dtype int8` lowers the KV cost but not the weight cost, so it does
+not rescue a card that is already half occupied.
 
 **Tool names are capped at 64 characters on the OpenAI route** (`src/serve/openai_schema.cpp`),
 and at 128 on the Anthropic route (`src/serve/anthropic_schema.cpp`). Both allow only
