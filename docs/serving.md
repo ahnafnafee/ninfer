@@ -579,7 +579,13 @@ requests and retained prefixes. Both are represented with 64-token pages interna
 sequence can never cross the exact `--max-context` frontier. `--kv-capacity N` requests an explicit
 capacity; `--kv-capacity auto` chooses the largest legal capacity that fits the memory remaining
 after weights are loaded while keeping 1 GiB of sizing headroom. When omitted it follows
-`--max-context`, preserving one full-length request's capacity. The shared pool is fixed at startup
+`--max-context`, preserving one full-length request's capacity.
+
+The pool also has a structural ceiling of `--max-concurrency` times `--max-context`. At the default
+concurrency of 1 that ceiling equals a single full context, so `auto` cannot resolve above
+`--max-context` no matter how much device memory is free, and the reported slack stays unclaimable.
+Raising `--max-concurrency` is what raises the ceiling; only then does free memory become the
+binding constraint on the resolved capacity. The shared pool is fixed at startup
 and is not divided evenly among request lanes.
 
 Automatic sizing evaluates the complete target runtime layout for the chosen concurrency, KV
