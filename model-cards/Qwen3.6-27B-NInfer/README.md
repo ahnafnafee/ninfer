@@ -72,9 +72,10 @@ only for NInfer; it is not a Transformers checkpoint, Safetensors distribution, 
 |---|---|
 | Filename | `qwen3_6_27b.ninfer` |
 | Size | 17,495,365,888 bytes (16.29 GiB) |
-| SHA-256 | `74fac75f3a6b7ab7b52e08c36969c7a33a8ba23465910eccd72d195adb497127` |
-| Container version | 1 |
+| SHA-256 | `7b51600ffd10632b9660f56085efdd9b751d79733ad32036a652234b64bebe7b` |
+| Container version | 2 |
 | NInfer model ID | `qwen3.6-27b` |
+| NInfer weights ID | `groupwise-int` |
 | NInfer target key | `qwen3_6_27b` |
 
 The file contains the registered Text, Vision, MTP, proposal-head, tokenizer, chat-template,
@@ -84,13 +85,15 @@ Verify a downloaded file with:
 
 ```bash
 printf '%s  %s\n' \
-  '74fac75f3a6b7ab7b52e08c36969c7a33a8ba23465910eccd72d195adb497127' \
+  '7b51600ffd10632b9660f56085efdd9b751d79733ad32036a652234b64bebe7b' \
   'qwen3_6_27b.ninfer' | sha256sum --check
 ```
 
 ## Requirements
 
-- [NInfer](https://github.com/Neroued/ninfer) built from source;
+- [NInfer](https://github.com/Neroued/ninfer) revision
+  [`bd265a3`](https://github.com/Neroued/ninfer/commit/bd265a36fe990475bae143d2073d6a6cf67d0da3)
+  or later, built from source;
 - 64-bit Linux;
 - NVIDIA GeForce RTX 5090 (`sm_120a`);
 - CUDA Toolkit 13.1 or newer.
@@ -125,16 +128,32 @@ The artifact supports:
 - MTP speculative decoding with draft windows from one to five;
 - BF16 and INT8 group-64 KV cache;
 - CUDA Graph decode and compatible-prefix reuse;
+- startup-bounded small-scale concurrent serving with true batched decode;
 - the NInfer CLI;
 - OpenAI Chat Completions and Anthropic Messages serving.
 
 ## Performance
 
-The following single-GPU serving measurements were collected on an NVIDIA GeForce RTX 5090 with
+The single-request serving measurements below were collected on an NVIDIA GeForce RTX 5090 with
 CUDA 13.1. Requests were submitted serially to a persistent `ninfer-serve` process with CUDA Graph
-enabled, a 1,024-token prefill chunk, INT8 group-64 KV cache, and prefix reuse disabled. Each value
-is the arithmetic mean ± sample standard deviation over five fixed seeds; warm-up requests are
-excluded.
+enabled, a 1,024-token prefill chunk, INT8 group-64 KV cache, and prefix reuse disabled. Each
+single-request value is the arithmetic mean ± sample standard deviation over five fixed seeds;
+warm-up requests are excluded. These results use `weights_id = groupwise-int`.
+
+### Concurrent MTP=3 decode saturation
+
+The concurrent campaign uses CUDA driver API 13.3 and one 293-token prompt followed by an
+8,192-token generation per active request. Each concurrency point starts a fresh server with MTP3,
+INT8 group-64 KV, CUDA Graphs, a 16,384-token per-request context limit, and prefix reuse disabled.
+Aggregate throughput includes only complete one-second intervals whose actual decode batch remains
+equal to C. Each row is one sustained wave.
+
+| C | Steady aggregate decode tok/s | Speedup vs. C1 | Wave makespan |
+|---:|---:|---:|---:|
+| 1 | 185.8 | 1.00× | 44.23 s |
+| 2 | 247.0 | 1.33× | 66.67 s |
+| 4 | 309.5 | 1.67× | 107.49 s |
+| 8 | 535.0 | 2.88× | 125.20 s |
 
 ### Long-context baseline (MTP disabled)
 
@@ -173,11 +192,10 @@ including metric definitions and the exact reproduction command.
 
 ## Evaluation
 
-The artifact is being evaluated through NInfer's OpenAI-compatible serving route with thinking
-enabled, MTP=3, and a 262,144-token context limit. EvalScope 1.9.0 uses 0-shot prompts, rule-based
-scoring, and one sample per problem with temperature 0.6, top-p 0.95, top-k 20, presence penalty
-1.0, and seed 42. Scores will be filled after all configured samples complete and the results have
-been validated.
+The artifact was evaluated through NInfer's OpenAI-compatible serving route with thinking enabled,
+MTP=3, and a 262,144-token context limit. EvalScope 1.9.0 used 0-shot prompts, rule-based scoring,
+and one sample per problem with temperature 0.6, top-p 0.95, top-k 20, presence penalty 1.0, and
+seed 42. All 258 configured samples completed and were scored.
 
 | Benchmark | Accuracy | Correct / total |
 |---|---:|---:|
@@ -185,14 +203,16 @@ been validated.
 | AIME 2026 | 93.33% | 28 / 30 |
 | GPQA-Diamond | 86.87% | 172 / 198 |
 
-These will be single-sample results under the stated NInfer evaluation profile, not pass@k scores.
+These are single-sample results under the stated NInfer evaluation profile, not pass@k scores.
 
 ## Limits
 
-- The artifact is accepted only by the matching NInfer target.
-- NInfer currently executes on one RTX 5090, one CUDA device, and one active request per Engine.
-- It does not provide continuous batching, multi-GPU execution, CPU/GPU offload, or distributed
-  serving.
+- The artifact is accepted only by NInfer revision `bd265a3` or later and the matching registered
+  target.
+- NInfer executes on one RTX 5090 and one CUDA device, with a startup-fixed capacity of 1–8 active
+  requests per Engine.
+- It does not provide large-scale or preemptive continuous batching, priority/QoS scheduling,
+  multi-GPU execution, CPU/GPU offload, or distributed serving.
 - Context allocation is subject to GPU memory and the selected KV-cache type.
 - NInfer does not execute generated tool calls.
 
@@ -205,9 +225,12 @@ These will be single-sample results under the stated NInfer evaluation profile, 
 | Conversion recipe | `qwen3_6_27b-v2` |
 | Converter repository | `https://github.com/Neroued/ninfer` |
 | Converter revision | `d6319426e5ef08fa95c36e75cb3ab8b18e5fb957` |
+| Minimum runtime revision | `bd265a36fe990475bae143d2073d6a6cf67d0da3` |
 
-The complete object inventory and conversion metadata are published in
+The artifact identity, summarized object inventory, and conversion provenance are published in
 [`artifact-manifest.json`](https://huggingface.co/neroued/Qwen3.6-27B-NInfer/blob/main/artifact-manifest.json).
+The exact storage contract is maintained in the
+[Qwen3.6-27B artifact reference](https://github.com/Neroued/ninfer/blob/master/docs/maintainer/qwen3.6-27b-artifact.md).
 
 ## License
 

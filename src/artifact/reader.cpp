@@ -27,6 +27,10 @@ using Json = nlohmann::json;
 
 constexpr std::array<std::byte, 8> kMagic = {
     std::byte{'N'}, std::byte{'I'}, std::byte{'N'}, std::byte{'F'},
+    std::byte{'E'}, std::byte{'R'}, std::byte{0},   std::byte{2},
+};
+constexpr std::array<std::byte, 8> kV1Magic = {
+    std::byte{'N'}, std::byte{'I'}, std::byte{'N'}, std::byte{'F'},
     std::byte{'E'}, std::byte{'R'}, std::byte{0},   std::byte{1},
 };
 constexpr std::uint64_t kPrefixBytes      = 16;
@@ -91,12 +95,16 @@ NumericFormat parse_format(std::string_view name) {
     if (name == "Q5G64_F16S") { return NumericFormat::Q5G64_F16S; }
     if (name == "Q6G64_F16S") { return NumericFormat::Q6G64_F16S; }
     if (name == "W8G32_F16S") { return NumericFormat::W8G32_F16S; }
+    if (name == "NVFP4") { return NumericFormat::NVFP4; }
+    if (name == "FP8_E4M3FN_ROW_BF16S") { return NumericFormat::FP8_E4M3FN_ROW_BF16S; }
     throw ArtifactError("unknown tensor format: " + std::string(name));
 }
 
 StorageLayout parse_layout(std::string_view name) {
     if (name == "contiguous-le-v1") { return StorageLayout::ContiguousLeV1; }
     if (name == "row-split-k128-v1") { return StorageLayout::RowSplitK128V1; }
+    if (name == "blockscale-k16-m128x4-v1") { return StorageLayout::BlockScaleK16M128x4V1; }
+    if (name == "row-scale-v1") { return StorageLayout::RowScaleV1; }
     throw ArtifactError("unknown tensor layout: " + std::string(name));
 }
 
@@ -264,10 +272,14 @@ std::uint64_t object_bytes(const ObjectDescriptor& object) noexcept {
 struct Reader::Impl {
     explicit Impl(const std::filesystem::path& path) : file(path) {
         if (file.size() < kPrefixBytes) {
-            throw ArtifactError("artifact is shorter than the v1 prefix");
+            throw ArtifactError("artifact is shorter than the v2 prefix");
+        }
+        if (std::equal(kV1Magic.begin(), kV1Magic.end(), file.data())) {
+            throw ArtifactError("NInfer artifact v1 is no longer supported; migrate it with: "
+                                "python3 -m tools.artifact.migrate_v1_to_v2 <artifact>");
         }
         if (!std::equal(kMagic.begin(), kMagic.end(), file.data())) {
-            throw ArtifactError("artifact magic is not NInfer v1");
+            throw ArtifactError("artifact magic is not NInfer v2");
         }
 
         const auto json_bytes = read_u64_le(file.data() + 8);
@@ -286,9 +298,13 @@ struct Reader::Impl {
             throw ArtifactError(std::string("invalid JSON directory: ") + error.what());
         }
 
-        static constexpr std::array root_members = {"model_id", "objects"};
+        static constexpr std::array root_members = {"identity", "objects"};
         require_members(directory, root_members, "directory root");
-        model = require_string(directory.at("model_id"), "model_id");
+        const auto& raw_identity                     = directory.at("identity");
+        static constexpr std::array identity_members = {"model_id", "weights_id"};
+        require_members(raw_identity, identity_members, "artifact identity");
+        identity.model_id   = require_string(raw_identity.at("model_id"), "model_id");
+        identity.weights_id = require_string(raw_identity.at("weights_id"), "weights_id");
 
         const auto& raw_objects = directory.at("objects");
         if (!raw_objects.is_array() || raw_objects.empty()) {
@@ -335,7 +351,7 @@ struct Reader::Impl {
     }
 
     MappedFile file;
-    std::string model;
+    ArtifactIdentity identity;
     std::vector<ObjectDescriptor> entries;
     std::unordered_map<std::string, std::size_t, TransparentStringHash, std::equal_to<>> index;
     std::uint64_t payload_start = 0;
@@ -347,7 +363,7 @@ Reader::~Reader()                            = default;
 Reader::Reader(Reader&&) noexcept            = default;
 Reader& Reader::operator=(Reader&&) noexcept = default;
 
-const std::string& Reader::model_id() const noexcept { return impl_->model; }
+const ArtifactIdentity& Reader::identity() const noexcept { return impl_->identity; }
 
 const std::vector<ObjectDescriptor>& Reader::objects() const noexcept { return impl_->entries; }
 

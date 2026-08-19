@@ -144,11 +144,12 @@ int run_edge_case() {
 int main() {
     if (cuda_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
-        return 0;
+        return 77;
     }
 
     int failures = 0;
     failures += run_contiguous_case("silu_mul [17408,1]", 17408, 1, 101u);
+    failures += run_contiguous_case("silu_mul [17408,48]", 17408, 48, 102u);
     failures += run_strided_gate_up_case();
     failures += run_edge_case();
     std::cout << (failures ? "FAIL" : "OK") << " silu_mul\n";

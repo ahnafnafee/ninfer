@@ -2,6 +2,7 @@
 
 #include "ninfer/ops/linear.h"
 #include "ninfer/ops/silu_mul.h"
+#include "core/layout.h"
 #include "ops/linear_swiglu/q4/q4_linear_swiglu_kernels.h"
 
 #include <algorithm>
@@ -30,9 +31,12 @@ struct RouteSpec {
 
 constexpr Q4LinearSwiGluProblem kShape{34816, 17408, 5120, 5120, 1};
 
-constexpr std::array<RouteSpec, 7> kRoutes{{
+constexpr std::array<RouteSpec, 10> kRoutes{{
     {{1, 1}, Q4LinearSwiGluScheduleId::GemvPair},
-    {{2, 128}, Q4LinearSwiGluScheduleId::Materialized},
+    {{2, 32}, Q4LinearSwiGluScheduleId::SmallTExact},
+    {{33, 40}, Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C40},
+    {{41, 48}, Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C48},
+    {{49, 128}, Q4LinearSwiGluScheduleId::Materialized},
     {{129, 256}, Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C128},
     {{257, 384}, Q4LinearSwiGluScheduleId::Materialized},
     {{385, 512}, Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C128},
@@ -58,17 +62,15 @@ bool supported_shape(const Q4LinearSwiGluProblem& problem) noexcept {
            problem.padded_k == kShape.padded_k;
 }
 
-std::size_t checked_matrix_bytes(std::int32_t rows, std::int32_t cols) {
-    const std::size_t r = static_cast<std::size_t>(rows);
-    const std::size_t c = static_cast<std::size_t>(cols);
-    if (c != 0 && r > std::numeric_limits<std::size_t>::max() / c) {
-        throw std::overflow_error("q4 linear_swiglu: workspace element count overflows size_t");
-    }
-    const std::size_t elements = r * c;
-    if (elements > std::numeric_limits<std::size_t>::max() / sizeof(std::uint16_t)) {
-        throw std::overflow_error("q4 linear_swiglu: workspace byte count overflows size_t");
-    }
-    return elements * sizeof(std::uint16_t);
+template <class Allocator>
+Tensor allocate_materialized_workspace(Allocator& allocator, std::int32_t rows, std::int32_t cols) {
+    return allocator.alloc(DType::BF16, {rows, cols});
+}
+
+std::size_t materialized_workspace_bytes(std::int32_t rows, std::int32_t cols) {
+    WorkspaceLayoutBuilder layout;
+    (void)allocate_materialized_workspace(layout, rows, cols);
+    return layout.peak_bytes(1);
 }
 
 } // namespace
@@ -77,6 +79,12 @@ const char* q4_linear_swiglu_schedule_name(Q4LinearSwiGluScheduleId schedule) no
     switch (schedule) {
     case Q4LinearSwiGluScheduleId::GemvPair:
         return "linear_swiglu.q4.gemv.paired_rows";
+    case Q4LinearSwiGluScheduleId::SmallTExact:
+        return "linear_swiglu.q4.mma.small_t.exact";
+    case Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C40:
+        return "linear_swiglu.q4.mma.split_half_pair.r32.c40";
+    case Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C48:
+        return "linear_swiglu.q4.mma.split_half_pair.r32.c48";
     case Q4LinearSwiGluScheduleId::Materialized:
         return "linear_swiglu.q4.materialized";
     case Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C128:
@@ -103,9 +111,12 @@ Q4LinearSwiGluPlan q4_linear_swiglu_resolve_plan(const Q4LinearSwiGluProblem& pr
         };
         switch (route.schedule) {
         case Q4LinearSwiGluScheduleId::GemvPair:
+        case Q4LinearSwiGluScheduleId::SmallTExact:
+        case Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C40:
+        case Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C48:
             return plan;
         case Q4LinearSwiGluScheduleId::Materialized:
-            plan.workspace_bytes = checked_matrix_bytes(problem.gate_up_rows, problem.cols);
+            plan.workspace_bytes = materialized_workspace_bytes(problem.gate_up_rows, problem.cols);
             return plan;
         case Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C128:
             return plan;
@@ -116,13 +127,17 @@ Q4LinearSwiGluPlan q4_linear_swiglu_resolve_plan(const Q4LinearSwiGluProblem& pr
 
 std::size_t q4_linear_swiglu_capacity_workspace_bytes(std::int32_t gate_up_rows,
                                                       std::int32_t output_rows, std::int32_t k,
-                                                      std::int32_t padded_k,
+                                                      std::int32_t padded_k, std::int32_t min_cols,
                                                       std::int32_t max_cols) {
+    if (min_cols <= 0 || max_cols < min_cols) {
+        throw std::invalid_argument("q4 linear_swiglu: invalid column interval");
+    }
+    (void)q4_linear_swiglu_resolve_plan({gate_up_rows, output_rows, k, padded_k, min_cols});
     (void)q4_linear_swiglu_resolve_plan({gate_up_rows, output_rows, k, padded_k, max_cols});
 
     std::size_t maximum = 0;
     for (const RouteSpec& route : kRoutes) {
-        if (route.cols.first > max_cols) { continue; }
+        if (route.cols.last < min_cols || route.cols.first > max_cols) { continue; }
         const std::int32_t endpoint = std::min(route.cols.last, max_cols);
         maximum                     = std::max(maximum, q4_linear_swiglu_resolve_plan(
                                         {gate_up_rows, output_rows, k, padded_k, endpoint})
@@ -143,10 +158,19 @@ void q4_linear_swiglu_execute_plan(const Q4LinearSwiGluPlan& plan, const Tensor&
     case Q4LinearSwiGluScheduleId::GemvPair:
         q4_linear_swiglu_gemv_pair_launch(x, w, out, stream);
         return;
+    case Q4LinearSwiGluScheduleId::SmallTExact:
+        q4_linear_swiglu_small_t_exact_launch(x, w, out, stream);
+        return;
+    case Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C40:
+        q4_linear_swiglu_mma_split_half_pair_r32_c40_launch(x, w, out, stream);
+        return;
+    case Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C48:
+        q4_linear_swiglu_mma_split_half_pair_r32_c48_launch(x, w, out, stream);
+        return;
     case Q4LinearSwiGluScheduleId::Materialized: {
         auto scratch_scope = ws.scope();
-        Tensor gate_up     = ws.alloc(DType::BF16, {problem.gate_up_rows, problem.cols});
-        linear(x, w, gate_up, ws, stream);
+        Tensor gate_up = allocate_materialized_workspace(ws, problem.gate_up_rows, problem.cols);
+        linear(x, w, gate_up, stream);
         silu_mul(gate_up.slice(0, 0, problem.output_rows),
                  gate_up.slice(0, problem.output_rows, problem.output_rows), out, stream);
         return;

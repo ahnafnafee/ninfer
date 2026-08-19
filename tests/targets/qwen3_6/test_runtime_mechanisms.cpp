@@ -41,23 +41,25 @@ void test_topology() {
 
 q36::DecoderStateSpec decoder_spec(ninfer::DType dtype, bool mtp) {
     return q36::DecoderStateSpec{
-        .full_attention_layers = 2,
-        .mtp_layers            = 1,
-        .capacity              = 129,
-        .kv_heads              = 2,
-        .attention_head_dim    = 64,
-        .kv_dtype              = dtype,
-        .kv_quant_group        = dtype == ninfer::DType::I8 ? ninfer::kKvQuantGroup : 0,
-        .enable_mtp            = mtp,
-        .gdn =
+        .full_attention_layers     = 2,
+        .mtp_layers                = 1,
+        .capacity                  = 129,
+        .kv_heads                  = 2,
+        .attention_head_dim        = 64,
+        .kv_dtype                  = dtype,
+        .kv_quant_group            = dtype == ninfer::DType::I8 ? q36::kKvQuantGroup : 0,
+        .enable_mtp                = mtp,
+        .text_physical_page_groups = 5,
+        .mtp_physical_page_groups  = mtp ? 4U : 0U,
+        .linear_attention =
             {
                 .layers         = 3,
-                .conv_dim       = 10,
+                .conv_channels  = 10,
                 .conv_width     = 3,
                 .value_heads    = 4,
                 .value_head_dim = 5,
                 .key_head_dim   = 6,
-                .snapshot_slots = 4,
+                .slot_count     = 4,
                 .conv_dtype     = ninfer::DType::BF16,
             },
     };
@@ -67,26 +69,39 @@ void test_decoder_layout() {
     ninfer::LayoutBuilder bf16_builder;
     const q36::DecoderStateLayout bf16 =
         q36::plan_decoder_state(bf16_builder, decoder_spec(ninfer::DType::BF16, false));
-    const std::size_t bf16_bytes = bf16_builder.finish(256);
-    expect(bf16_bytes != 0, "BF16 decoder layout has storage");
-    expect(bf16.text_kv.k.size() == 2 && bf16.text_kv.v.size() == 2, "Text KV layer planes");
-    expect(bf16.text_kv.padded_context == 256, "Text KV capacity padding");
-    expect(bf16.text_kv.k_scale.empty() && bf16.text_kv.v_scale.empty(),
+    (void)bf16_builder.finish(256);
+    expect(bf16.text_kv.pool.planes.size() == 4, "BF16 Text KV has K/V planes per layer");
+    expect(bf16.text_kv.pool.spec.page_group_count == 5 &&
+               bf16.text_kv.pool.spec.logical_page_capacity == 3 &&
+               bf16.text_kv.pool.spec.table_rows == 1,
+           "Text KV separates five physical pages from three logical pages");
+    expect(std::all_of(bf16.text_kv.pool.planes.begin(), bf16.text_kv.pool.planes.end(),
+                       [](const ninfer::PagedKVPlaneLayout& plane) {
+                           return plane.spec.dtype == ninfer::DType::BF16;
+                       }),
            "BF16 KV has no scale planes");
     expect(!bf16.mtp_kv.has_value(), "disabled MTP omits KV storage");
-    expect(bf16.gdn.conv.size() == 3 && bf16.gdn.ssm.size() == 3, "GDN layer storage");
-    expect(bf16.gdn.spec.snapshot_slots == 4, "GDN snapshot geometry");
+    expect(bf16.linear_attention.conv.size() == 3 && bf16.linear_attention.recurrent.size() == 3,
+           "Linear Attention layer storage");
+    expect(bf16.linear_attention.spec.slot_count == 4, "Linear Attention slot geometry");
     expect(bf16.kv_payload_bytes() == bf16.text_kv.payload_bytes(), "BF16 KV payload accounting");
 
     ninfer::LayoutBuilder int8_builder;
     const q36::DecoderStateLayout int8 =
         q36::plan_decoder_state(int8_builder, decoder_spec(ninfer::DType::I8, true));
     (void)int8_builder.finish(256);
-    expect(int8.text_kv.k_scale.size() == 2 && int8.text_kv.v_scale.size() == 2,
-           "INT8 Text KV scale planes");
-    expect(int8.mtp_kv.has_value() && int8.mtp_kv->k.size() == 1, "enabled MTP has one KV layer");
-    expect(int8.mtp_kv && int8.mtp_kv->k_scale.size() == 1 && int8.mtp_kv->v_scale.size() == 1,
-           "INT8 MTP KV scale planes");
+    expect(int8.text_kv.pool.planes.size() == 8 &&
+               int8.text_kv.pool.planes[2].spec.dtype == ninfer::DType::FP16 &&
+               int8.text_kv.pool.planes[3].spec.dtype == ninfer::DType::FP16,
+           "INT8 Text KV has code and scale planes per layer");
+    expect(int8.mtp_kv.has_value() && int8.mtp_kv->layers == 1 &&
+               int8.mtp_kv->pool.planes.size() == 4 &&
+               int8.mtp_kv->pool.spec.page_group_count == 4 &&
+               int8.mtp_kv->pool.spec.logical_page_capacity == 3,
+           "enabled MTP has one paged KV layer");
+    expect(int8.mtp_kv && int8.mtp_kv->pool.planes[2].spec.dtype == ninfer::DType::FP16 &&
+               int8.mtp_kv->pool.planes[3].spec.dtype == ninfer::DType::FP16,
+           "INT8 MTP KV has scale planes");
     expect(int8.kv_payload_bytes() == int8.text_kv.payload_bytes() + int8.mtp_kv->payload_bytes(),
            "INT8 Text/MTP KV payload accounting");
 }
@@ -99,32 +114,35 @@ void test_round_layout() {
     const ninfer::TensorRegion exact_prefill =
         builder.add_tensor(ninfer::DType::BF16, {32, 16}, 256, "exact prefill hidden");
     q36::complete_round_state_layout(builder, round);
-    const std::size_t bytes = builder.finish(256);
-    expect(round.complete && bytes != 0, "round layout completes");
-    expect(round.logits.shape[0] == 128 && round.logits.shape[1] == 6, "round logits shape");
-    expect(round.verify_hidden.shape[0] == 32 && round.verify_hidden.shape[1] == 6,
-           "round verification hidden shape");
-    expect(round.speculative.draft_tokens.shape[0] == 5 &&
-               round.speculative.round_tokens.shape[0] == 6,
-           "round speculative vector shapes");
-    expect(round.verify_hidden.region.offset < exact_prefill.region.offset &&
-               exact_prefill.region.offset < round.speculative.target_argmax.region.offset,
+    (void)builder.finish(256);
+    expect(round.complete, "round layout completes");
+    expect(round.logits.shape[0] == 128 && round.logits.shape[1] == 1, "round logits shape");
+    expect(round.mtp.has_value() && round.mtp->draft_tokens.shape[0] == 5 &&
+               round.mtp->target_input_ids.shape[0] == 6,
+           "MTP prefill scratch shapes");
+    expect(round.logits.region.offset < exact_prefill.region.offset &&
+               exact_prefill.region.offset < round.mtp->draft_tokens.region.offset,
            "exact prefill extension retains established round-region order");
-    expect(round.mtp.has_value() && round.mtp->alignment_ids.shape[0] == 6,
-           "MTP round extension is explicit");
+    expect(round.mtp.has_value() && round.mtp->position.shape[0] == 1,
+           "MTP prefill scratch is explicit");
+    expect(round.mtp_decode.has_value() && round.mtp_decode->alignment_ids.shape[0] == 6 &&
+               round.mtp_decode->alignment_ids.shape[1] == 1,
+           "MTP decode frame is explicit");
 
     ninfer::LayoutBuilder speculative_builder;
-    q36::RoundStateLayout speculative = q36::begin_round_state_layout(
+    q36::RoundStateLayout dflash = q36::begin_round_state_layout(
         speculative_builder,
         q36::RoundStateSpec{
-            .hidden = 32, .output_rows = 128, .draft_window = 15, .enable_mtp = false});
-    q36::complete_round_state_layout(speculative_builder, speculative);
+            .hidden = 32, .output_rows = 128, .draft_window = 15, .enable_dflash = true});
+    q36::complete_round_state_layout(speculative_builder, dflash);
     (void)speculative_builder.finish(256);
-    expect(speculative.logits.shape[1] == 16 &&
-               speculative.speculative.draft_tokens.shape[0] == 15 &&
-               speculative.speculative.stats.shape[0] == 19,
-           "K=15 shared speculative geometry");
-    expect(!speculative.mtp.has_value(), "shared speculative state does not imply MTP state");
+    expect(dflash.logits.shape[1] == 1 && dflash.dflash_prefill.has_value() &&
+               dflash.dflash_prefill->produced_count.shape[0] == 1 &&
+               dflash.dflash_decode.has_value() &&
+               dflash.dflash_decode->draft_tokens.shape[0] == 15,
+           "K=15 DFlash storage is backend-owned");
+    expect(!dflash.mtp.has_value() && !dflash.mtp_decode.has_value(),
+           "DFlash layout does not allocate MTP storage");
 }
 
 void test_mtp_alignment() {
@@ -198,8 +216,8 @@ q36::PreparedPromptData identity_prompt(std::uint8_t digest_byte = 1) {
     prompt.token_ids   = {10, 248056, 248056, 11};
     prompt.token_types = {0, static_cast<std::uint8_t>(q36::PromptModality::Image),
                           static_cast<std::uint8_t>(q36::PromptModality::Image), 0};
-    prompt.positions   = {0, 1, 1, 2, 0, 1, 1, 2, 0, 1, 2, 3};
-    prompt.rope_delta  = -1;
+    prompt.positions   = {0, 1, 1, 3, 0, 1, 1, 3, 0, 1, 2, 3};
+    prompt.rope_delta  = 0;
     q36::VisionItem item{.modality    = q36::PromptModality::Image,
                          .grid        = {.temporal = 1, .height = 2, .width = 4},
                          .patch_begin = 0,
@@ -253,7 +271,7 @@ void test_prefix_identity() {
 
     resident.append_generated(1, original.rope_delta);
     ledger.push_back(12);
-    append_text_token(original, 12, 3);
+    append_text_token(original, 12, 4);
     expect(q36::detail::prefix_matches(original, ledger, resident, ledger.size()),
            "generated multimodal continuation identity");
 

@@ -100,13 +100,17 @@ int run_case(std::int32_t physical_rows, std::int32_t valid_rows, std::int32_t t
 int main() {
     if (cuda_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
-        return 0;
+        return 77;
     }
 
     int failures = 0;
     failures += run_case(248320, 248077, 1);
     failures += run_case(248320, 248077, 6);
+    failures += run_case(248320, 248077, 15);
+    failures += run_case(248320, 248077, 128);
     failures += run_case(131072, 131072, 1);
+    failures += run_case(131072, 131072, 15);
+    failures += run_case(131072, 131072, 120);
     std::cout << (failures ? "FAIL" : "OK") << " argmax\n";
     return failures ? 1 : 0;
 }

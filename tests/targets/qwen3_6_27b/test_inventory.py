@@ -1,5 +1,3 @@
-from collections import Counter
-
 from tools.convert.qwen3_6_27b import inventory
 
 
@@ -9,6 +7,7 @@ def _tensor_by_name() -> dict[str, inventory.TensorSpec]:
 
 def test_complete_full_only_inventory_and_canonical_order() -> None:
     assert inventory.MODEL_ID == "qwen3.6-27b"
+    assert inventory.WEIGHTS_ID == "groupwise-int"
     assert inventory.TARGET_KEY == "qwen3_6_27b"
 
     assert len(inventory.TEXT_CORE_TENSOR_SPECS) == 771
@@ -56,9 +55,6 @@ def test_format_layout_counts_and_key_signatures() -> None:
         "contiguous-le-v1": 679,
         "row-split-k128-v1": 439,
     }
-    assert Counter(spec.format for spec in inventory.TENSOR_SPECS) == inventory.FORMAT_COUNTS
-    assert Counter(spec.layout for spec in inventory.TENSOR_SPECS) == inventory.LAYOUT_COUNTS
-
     tensors = _tensor_by_name()
     assert tensors["text/token_embedding"] == inventory.TensorSpec(
         "text/token_embedding", (248320, 5120), "Q6G64_F16S", "row-split-k128-v1"

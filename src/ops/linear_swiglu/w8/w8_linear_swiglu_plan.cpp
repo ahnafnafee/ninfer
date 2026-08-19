@@ -19,8 +19,8 @@ struct RouteSpec {
 
 constexpr std::array<RouteSpec, 18> kRoutes{{
     {1, 1, W8LinearSwiGluScheduleId::DecodePairR16},
-    {2, 32, W8LinearSwiGluScheduleId::SplitKMmaExactT},
-    {33, 64, W8LinearSwiGluScheduleId::MmaR32C64},
+    {2, 48, W8LinearSwiGluScheduleId::SplitKMmaExactT},
+    {49, 64, W8LinearSwiGluScheduleId::MmaR32C64},
     {65, 80, W8LinearSwiGluScheduleId::MmaR32C80},
     {81, 96, W8LinearSwiGluScheduleId::MmaR32C96},
     {97, 128, W8LinearSwiGluScheduleId::MmaR64C64},
@@ -61,7 +61,7 @@ const char* w8_linear_swiglu_schedule_name(W8LinearSwiGluScheduleId schedule) no
     case W8LinearSwiGluScheduleId::DecodePairR16:
         return "linear_swiglu.w8.decode.pair.r16";
     case W8LinearSwiGluScheduleId::SplitKMmaExactT:
-        return "linear_swiglu.w8.splitk.mma.pair.r8.exact_t";
+        return "linear_swiglu.w8.splitk.mma.pair.exact_t";
     case W8LinearSwiGluScheduleId::MmaR32C64:
         return "linear_swiglu.w8.mma.pair.r16.c64";
     case W8LinearSwiGluScheduleId::MmaR32C80:
@@ -98,9 +98,7 @@ W8LinearSwiGluPlan w8_linear_swiglu_resolve_plan(const W8LinearSwiGluProblem& pr
             "W8 LinearSwiGLU: exact problem or column count is not admitted");
     }
     for (const RouteSpec& route : kRoutes) {
-        if (problem.cols >= route.first && problem.cols <= route.last) {
-            return {route.schedule, 0};
-        }
+        if (problem.cols >= route.first && problem.cols <= route.last) { return {route.schedule}; }
     }
     throw std::logic_error("W8 LinearSwiGLU: admitted problem has no route");
 }
@@ -109,7 +107,7 @@ void w8_linear_swiglu_execute_plan(const W8LinearSwiGluPlan& plan, const Tensor&
                                    Tensor& out, cudaStream_t stream) {
     const W8LinearSwiGluProblem problem{w.n, out.ne[0], x.ne[0], w.padded_shape[1], x.ne[1]};
     const W8LinearSwiGluPlan resolved = w8_linear_swiglu_resolve_plan(problem);
-    if (resolved.schedule != plan.schedule || resolved.workspace_bytes != plan.workspace_bytes) {
+    if (resolved.schedule != plan.schedule) {
         throw std::invalid_argument("W8 LinearSwiGLU: plan does not match exact problem");
     }
     switch (plan.schedule) {

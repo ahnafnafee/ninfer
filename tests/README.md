@@ -26,12 +26,16 @@ benchmark-report, and external protocol behavior. Repository verification princi
   and the opt-in real public-Engine route;
 - `test_ninfer_artifact_reader.cpp` — C++ framing, directory, encoded-size, payload-span, and
   geometry behavior against a self-contained C++ fixture;
-- `test_generation_controller.cpp` — accepted-prefix, cancellation, publication ordering, and
-  request-abort behavior in the common generated-token loop;
-- `test_openai_schema.cpp`, `test_anthropic_schema.cpp`, and `test_tool_call_parser.cpp` — current
-  protocol translation and tool-call behavior;
-- `test_ninfer_bench_support.cpp` — product benchmark CLI, timing boundary, and schema-v8 reports;
-- `test_bench_matrix.py` — schema-v8 report consumption by the Python matrix summarizer;
+- `test_request_memory.cpp` — startup-frozen request-transient capacity, stable address,
+  activation alignment, rejection, and peak semantics;
+- `test_openai_schema.cpp`, `test_responses_schema.cpp`, `test_response_store.cpp`,
+  `test_anthropic_schema.cpp`, and `test_tool_call_parser.cpp` — current protocol translation,
+  Responses Item/state/SSE behavior, and incremental tool-call behavior;
+- `test_request_log.cpp` and `test_http_error_handler.cpp` — generation lifecycle records,
+  preparation rejections, protocol-shaped payload-limit errors, and application-error preservation;
+- `test_ninfer_bench_support.cpp` — product benchmark CLI, timing boundary, and schema-v9 reports;
+- `test_bench_matrix.py` — schema-v9 report consumption by the Python matrix summarizer;
+- `test_serve_corpus.py` — serving request-log schema compatibility at the measurement consumer;
 - device/tensor/arena tests — reusable lower-component behavior; KV tests cover the core physical
   container, family runtime tests cover dimension-driven GDN storage/view mechanics, and Op tests
   cover mathematical state transitions at their own boundary.
@@ -40,6 +44,10 @@ Tests are grouped by observable risk, not by mirroring every source file or clas
 `ops/op_tester.h` and `ops/op_check.h` own only reusable device/guard and comparison mechanics.
 Concrete numerical criteria remain named by the semantic Op suite; there are no cross-Op tolerance
 presets.
+
+`ops/quantized_weight.h` is the common packed-weight fixture for Q4/Q5/Q6/W8 and NVFP4 Op tests. It
+owns deterministic payload generation, device `Weight` views, row views, and independent logical
+weight decoding.
 
 ## Build and run
 
@@ -76,8 +84,9 @@ cmake --build build --parallel --target \
 ctest --test-dir build -R '^ninfer_linear_(q4|q5|q6|w8)_a16_test$' --output-on-failure
 ```
 
-All Linear files use `ops/linear/linear_test_common.{h,cpp}`. Its explicit Q4/Q5/Q6/W8 generators
-produce both the complete packed GPU payload and the logical float rows used by the one
+All Linear files use `ops/linear/linear_test_common.{h,cpp}` and the same
+`ops/quantized_weight.h` fixture as the fused projection tests. The fixture produces the complete
+packed GPU payload and exact-decodes the logical float rows used by the one
 `cpu_linear_gemm_fp64()` reference. The reference performs naive double accumulation and never
 reproduces a production route's activation quantization, staging, reduction tree, or BF16 output
 rounding. Each activation compute path selects one centrally defined comparison tolerance for its
@@ -90,7 +99,7 @@ Run the native Python suites with the project Python environment:
 ```bash
 python3 -m pytest \
   tests/artifact tests/targets/qwen3_6_27b tests/targets/qwen3_6_35b_a3b \
-  tests/test_bench_matrix.py
+  tests/test_bench_matrix.py tests/test_serve_corpus.py
 ```
 
 The Python binding tests use `NINFER_QWEN3_6_27B_ARTIFACT` when set, otherwise they look for
@@ -128,7 +137,7 @@ Run the serving contract manually after starting a resident server in another te
 
 ```bash
 ./build/apps/ninfer-serve out/qwen3_6_27b.ninfer \
-  --host 127.0.0.1 --port 18080 --model-id qwen3.6-27b
+  --host 127.0.0.1 --port 18080
 ```
 
 ```bash
@@ -137,8 +146,24 @@ python3 -m tools.smoke.serve_contract \
 ```
 
 This smoke check is intentionally not a CTest: it needs the real artifact, a supported GPU, and a
-server process that remains alive while the client exercises OpenAI, Anthropic, streaming, and
-multimodal requests.
+server process that remains alive while the client exercises OpenAI Responses/Chat, Anthropic,
+state, streaming, and multimodal requests.
+
+The thinking-preservation fixture starts and stops its own server, submits a fixed two-step tool
+history, compares restored and cold greedy output, compares stripped and preserved closed-turn
+prompt lengths, and verifies turn/response rewrite-checkpoint reuse paths plus Responses
+inheritance:
+
+```bash
+python3 tools/smoke/serve_thinking_preservation.py \
+  --artifact out/qwen3_6_27b.ninfer --backend mtp
+
+python3 tools/smoke/serve_thinking_preservation.py \
+  --artifact out/qwen3_6_35b_a3b.ninfer --backend dflash
+```
+
+The shared messages are in
+[`fixtures/serve/qwen3_6_thinking_preservation.json`](fixtures/serve/qwen3_6_thinking_preservation.json).
 
 ## What belongs here
 

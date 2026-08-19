@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <utility>
+#include <variant>
 
 namespace ninfer::targets::qwen3_6_27b::detail {
 
@@ -21,29 +22,63 @@ inline constexpr std::size_t kTextLayers          = 64;
 inline constexpr std::size_t kFullAttentionLayers = 16;
 inline constexpr std::size_t kGdnLayers           = 48;
 
+struct WeightPlan {
+    artifact::ObjectHandle object;
+    artifact::NumericFormat format          = artifact::NumericFormat::BF16;
+    std::uint32_t weight_scale_divisor_bits = 0;
+    std::uint32_t input_scale_divisor_bits  = 0;
+};
+
 struct MlpPlan {
-    artifact::ObjectHandle gate_up;
-    artifact::ObjectHandle down;
+    WeightPlan gate_up;
+    WeightPlan down;
+};
+
+struct SplitAttentionProjectionPlan {
+    WeightPlan query_key;
+    WeightPlan gate_value;
+};
+
+struct FusedAttentionProjectionPlan {
+    WeightPlan query_key_gate_value;
 };
 
 struct FullAttentionPlan {
-    artifact::ObjectHandle query_key;
-    artifact::ObjectHandle gate_value;
+    std::variant<SplitAttentionProjectionPlan, FusedAttentionProjectionPlan> projection;
     artifact::ObjectHandle query_norm;
     artifact::ObjectHandle key_norm;
-    artifact::ObjectHandle output;
+    WeightPlan output;
 };
+
+struct SplitGdnInputProjectionPlan {
+    WeightPlan query_key;
+    WeightPlan value_z;
+};
+
+struct FusedGdnInputProjectionPlan {
+    WeightPlan query_key_value_z;
+};
+
+struct SplitGdnControlProjectionPlan {
+    WeightPlan a_projection;
+    WeightPlan b_projection;
+};
+
+struct FusedGdnControlProjectionPlan {
+    WeightPlan a_b_projection;
+};
+
+using GdnControlProjectionPlan =
+    std::variant<SplitGdnControlProjectionPlan, FusedGdnControlProjectionPlan>;
 
 struct GdnPlan {
     artifact::ObjectHandle a_log;
     artifact::ObjectHandle dt_bias;
     artifact::ObjectHandle convolution;
-    artifact::ObjectHandle a_projection;
-    artifact::ObjectHandle b_projection;
-    artifact::ObjectHandle query_key;
-    artifact::ObjectHandle value_z;
+    GdnControlProjectionPlan control_projection;
+    std::variant<SplitGdnInputProjectionPlan, FusedGdnInputProjectionPlan> input_projection;
     artifact::ObjectHandle norm;
-    artifact::ObjectHandle output;
+    WeightPlan output;
 };
 
 struct TextLayerPlan {
@@ -73,10 +108,10 @@ struct BindingPlan {
     qwen3_6::FrontendResourcePlan frontend;
     qwen3_6::StartupFeatures features;
 
-    artifact::ObjectHandle token_embedding;
+    WeightPlan token_embedding;
     std::array<TextLayerPlan, kTextLayers> text_layers;
     artifact::ObjectHandle final_norm;
-    artifact::ObjectHandle output_head;
+    WeightPlan output_head;
     artifact::ObjectHandle draft_head;
     artifact::ObjectHandle draft_head_token_ids;
     MtpPlan mtp;
@@ -93,26 +128,55 @@ struct ArtifactLoadPlan {
     artifact::MaterializationPlan materialization;
 };
 
-ArtifactLoadPlan bind_artifact(artifact::Binder& binder, qwen3_6::StartupFeatures features);
+ArtifactLoadPlan bind_artifact(artifact::Binder& binder, WeightsProfile weights_profile,
+                               qwen3_6::StartupFeatures features);
 
 struct DensePostMixerPayload {
     Weight gate_up;
     Weight down;
 };
 
-struct FullAttentionProjectionPayload {
+struct SplitAttentionProjectionPayload {
     Weight query_key;
     Weight gate_value;
 };
 
+struct FusedAttentionProjectionPayload {
+    Weight query_key_gate_value;
+};
+
+using FullAttentionProjectionPayload =
+    std::variant<SplitAttentionProjectionPayload, FusedAttentionProjectionPayload>;
+
+struct SplitGdnInputProjectionPayload {
+    Weight query_key;
+    Weight value_z;
+};
+
+struct FusedGdnInputProjectionPayload {
+    Weight query_key_value_z;
+};
+
+using GdnInputProjectionPayload =
+    std::variant<SplitGdnInputProjectionPayload, FusedGdnInputProjectionPayload>;
+
+struct SplitGdnControlProjectionPayload {
+    Weight a_projection;
+    Weight b_projection;
+};
+
+struct FusedGdnControlProjectionPayload {
+    Weight a_b_projection;
+};
+
+using GdnControlProjectionPayload =
+    std::variant<SplitGdnControlProjectionPayload, FusedGdnControlProjectionPayload>;
+
 struct GdnProjectionPayload {
     Tensor a_log;
     Tensor dt_bias;
-    Weight a_projection;
-    Weight b_projection;
-    Weight query_key;
-    Weight value;
-    Weight z;
+    GdnControlProjectionPayload control_projection;
+    GdnInputProjectionPayload input_projection;
 };
 
 struct MtpAttentionPayload {
@@ -147,9 +211,11 @@ public:
 
 class LoadedModel::Impl {
 public:
-    Impl(BindingPlan plan, artifact::MaterializedArtifact materialized)
-        : data(std::move(plan), std::move(materialized)) {}
+    Impl(WeightsProfile weights_profile_in, BindingPlan plan,
+         artifact::MaterializedArtifact materialized)
+        : weights_profile(weights_profile_in), data(std::move(plan), std::move(materialized)) {}
 
+    WeightsProfile weights_profile;
     LoadedModelData data;
 };
 

@@ -12,11 +12,11 @@ bool sparse_moe_uses_small_t(std::int32_t tokens) noexcept {
 
 std::size_t sparse_moe_small_t_workspace_bytes(std::int32_t tokens) {
     if (!sparse_moe_uses_small_t(tokens)) {
-        throw std::invalid_argument("sparse_moe small-T: tokens must be in [2,44]");
+        throw std::invalid_argument("sparse_moe small-T: tokens must be in [2,46]");
     }
     WorkspaceLayoutBuilder layout;
     (void)allocate_sparse_moe_small_t_workspace(layout, tokens);
-    return layout.peak_bytes(256);
+    return layout.peak_bytes(1);
 }
 
 SparseMoeSmallTPlan resolve_sparse_moe_small_t_plan(std::int32_t tokens, QType routed_gate_up,

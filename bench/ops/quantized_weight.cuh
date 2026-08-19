@@ -162,6 +162,123 @@ inline PackedQuantizedWeight make_row_split_weight(QType qtype, std::int32_t n, 
     return result;
 }
 
+inline PackedQuantizedWeight make_nvfp4_weight(std::int32_t n, std::int32_t k) {
+    if (n <= 0 || k <= 0 || (n % 128) != 0 || (k % 64) != 0) {
+        throw std::invalid_argument("invalid benchmark NVFP4 weight shape");
+    }
+    const std::uint64_t elements =
+        detail::checked_mul(static_cast<std::uint64_t>(n), static_cast<std::uint64_t>(k),
+                            "benchmark NVFP4 element count overflow");
+    const std::uint64_t code_bytes   = elements / 2;
+    const std::uint64_t scale_offset = detail::align_up(code_bytes, 256);
+    const std::uint64_t scale_bytes  = elements / 16;
+    const std::uint64_t divisor_offset =
+        detail::checked_add(scale_offset, scale_bytes, "benchmark NVFP4 divisor offset overflow");
+    const std::uint64_t payload_bytes =
+        detail::checked_add(divisor_offset, sizeof(float), "benchmark NVFP4 payload size overflow");
+    if (payload_bytes > std::numeric_limits<std::size_t>::max()) {
+        throw std::overflow_error("benchmark NVFP4 payload does not fit size_t");
+    }
+
+    PackedQuantizedWeight result{
+        DeviceBuffer(static_cast<std::size_t>(payload_bytes)),
+        {},
+        code_bytes,
+        0,
+        0,
+        scale_offset,
+        scale_bytes,
+    };
+    CUDA_CHECK(cudaMemset(result.storage.p, 0, result.storage.bytes));
+    CUDA_CHECK(cudaMemset(result.storage.p, 0x22, code_bytes));
+    CUDA_CHECK(
+        cudaMemset(static_cast<std::uint8_t*>(result.storage.p) + scale_offset, 0x38, scale_bytes));
+    constexpr float kWeightDivisor = 0.125F;
+    CUDA_CHECK(cudaMemcpy(static_cast<std::uint8_t*>(result.storage.p) + divisor_offset,
+                          &kWeightDivisor, sizeof(kWeightDivisor), cudaMemcpyHostToDevice));
+
+    Weight& weight              = result.weight;
+    weight.payload              = result.storage.p;
+    weight.payload_bytes        = payload_bytes;
+    weight.qtype                = QType::NVFP4;
+    weight.layout               = QuantLayout::BlockScaleK16M128x4;
+    weight.scale_dtype          = DType::FP8_E4M3FN;
+    weight.group_size           = 16;
+    weight.group                = 16;
+    weight.ndim                 = 2;
+    weight.shape[0]             = n;
+    weight.shape[1]             = k;
+    weight.padded_shape[0]      = n;
+    weight.padded_shape[1]      = k;
+    weight.qdata                = result.storage.p;
+    weight.qhigh                = nullptr;
+    weight.scales               = static_cast<std::uint8_t*>(result.storage.p) + scale_offset;
+    weight.n                    = n;
+    weight.k                    = k;
+    weight.weight_scale_divisor = kWeightDivisor;
+    weight.input_scale_divisor  = 3.5F;
+    return result;
+}
+
+inline PackedQuantizedWeight make_fp8_weight(std::int32_t n, std::int32_t k) {
+    if (n <= 0 || k <= 0) { throw std::invalid_argument("invalid benchmark FP8 weight shape"); }
+    const std::uint64_t code_bytes =
+        detail::checked_mul(static_cast<std::uint64_t>(n), static_cast<std::uint64_t>(k),
+                            "benchmark FP8 code size overflow");
+    const std::uint64_t scale_offset = detail::align_up(code_bytes, 256);
+    const std::uint64_t scale_bytes =
+        detail::checked_mul(static_cast<std::uint64_t>(n), 2, "benchmark FP8 scale size overflow");
+    const std::uint64_t payload_bytes =
+        detail::checked_add(scale_offset, scale_bytes, "benchmark FP8 payload size overflow");
+    if (payload_bytes > std::numeric_limits<std::size_t>::max()) {
+        throw std::overflow_error("benchmark FP8 payload does not fit size_t");
+    }
+
+    PackedQuantizedWeight result{
+        DeviceBuffer(static_cast<std::size_t>(payload_bytes)),
+        {},
+        code_bytes,
+        0,
+        0,
+        scale_offset,
+        scale_bytes,
+    };
+    CUDA_CHECK(cudaMemset(result.storage.p, 0, result.storage.bytes));
+    CUDA_CHECK(cudaMemset(result.storage.p, 0x31, code_bytes));
+    detail::fill_f16_kernel<<<detail::launch_grid(n), 256>>>(
+        reinterpret_cast<std::uint16_t*>(static_cast<std::uint8_t*>(result.storage.p) +
+                                         scale_offset),
+        static_cast<std::uint64_t>(n), 0x3c00U);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    Weight& weight          = result.weight;
+    weight.payload          = result.storage.p;
+    weight.payload_bytes    = payload_bytes;
+    weight.high_plane_bytes = 0;
+    weight.qtype            = QType::FP8_E4M3FN_ROW_BF16S;
+    weight.layout           = QuantLayout::RowScale;
+    weight.scale_dtype      = DType::BF16;
+    weight.group_size       = static_cast<std::uint32_t>(k);
+    weight.group            = k;
+    weight.ndim             = 2;
+    weight.shape[0]         = n;
+    weight.shape[1]         = k;
+    weight.padded_shape[0]  = n;
+    weight.padded_shape[1]  = k;
+    weight.qdata            = result.storage.p;
+    weight.qhigh            = nullptr;
+    weight.scales           = static_cast<std::uint8_t*>(result.storage.p) + scale_offset;
+    weight.n                = n;
+    weight.k                = k;
+    weight.scale_ne[0]      = n;
+    weight.scale_nb[0]      = 2;
+    weight.scale_nb[1]      = static_cast<std::int64_t>(n) * 2;
+    weight.scale_nb[2]      = weight.scale_nb[1];
+    weight.scale_nb[3]      = weight.scale_nb[1];
+    return result;
+}
+
 inline Weight row_view(const Weight& parent, std::int32_t row_begin, std::int32_t rows) {
     if (parent.layout != QuantLayout::RowSplit || row_begin < 0 || rows <= 0 ||
         row_begin > parent.n - rows) {

@@ -142,16 +142,19 @@ int split_case(std::int32_t tokens) {
 int main() {
     if (cuda_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
-        return 0;
+        return 77;
     }
 
     int failures = 0;
     failures += pack_case(5120, 1);
     failures += pack_case(5120, 6);
+    failures += pack_case(5120, 48);
     failures += pack_case(2048, 1);
     failures += pack_case(2048, 6);
+    failures += pack_case(2048, 48);
     failures += split_case(1);
     failures += split_case(6);
+    failures += split_case(48);
     std::cout << (failures ? "FAIL" : "OK") << " mtp_pack\n";
     return failures ? 1 : 0;
 }

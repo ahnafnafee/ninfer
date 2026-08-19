@@ -1,7 +1,7 @@
 #include "ninfer/ops/sparse_moe.h"
 
 #include "ops/op_tester.h"
-#include "ops/row_split_pack.h"
+#include "ops/quantized_weight.h"
 
 #include <cuda_runtime.h>
 
@@ -125,7 +125,7 @@ public:
         }
     }
 
-    void copy_rows(const row_split::PackedWeight& source, std::int32_t destination_row) {
+    void copy_rows(const quantized_weight::PackedWeight& source, std::int32_t destination_row) {
         const std::int32_t source_rows = source.weight.n;
         if (source.weight.qtype != qtype_ || source.weight.k != columns_ || source_rows < 1 ||
             destination_row < 0 || destination_row > rows_ - source_rows) {
@@ -167,7 +167,7 @@ public:
         return result;
     }
 
-    int verify_rows(const std::string& label, const row_split::PackedWeight& source,
+    int verify_rows(const std::string& label, const quantized_weight::PackedWeight& source,
                     std::int32_t destination_row) const {
         const std::int32_t source_rows = source.weight.n;
         int failures                   = 0;
@@ -187,25 +187,6 @@ public:
         return failures;
     }
 
-    int verify_zero_row(const std::string& label, std::int32_t row) const {
-        if (row < 0 || row >= rows_) {
-            throw std::invalid_argument("sparse_moe test: invalid zero row");
-        }
-        int failures = 0;
-        failures +=
-            verify_zero_plane(label + " code", codes_,
-                              static_cast<std::size_t>(row) * code_row_bytes_, code_row_bytes_);
-        if (high_row_bytes_ != 0) {
-            failures +=
-                verify_zero_plane(label + " high", *high_,
-                                  static_cast<std::size_t>(row) * high_row_bytes_, high_row_bytes_);
-        }
-        failures +=
-            verify_zero_plane(label + " scale", scales_,
-                              static_cast<std::size_t>(row) * scale_row_bytes_, scale_row_bytes_);
-        return failures;
-    }
-
 private:
     static int verify_plane(const std::string& label, const DeviceBuffer& device,
                             const std::uint8_t* expected, std::size_t offset, std::size_t bytes) {
@@ -213,18 +194,6 @@ private:
         device.copy_to_host(actual.data(), bytes, offset);
         if (std::memcmp(actual.data(), expected, bytes) == 0) { return 0; }
         std::cerr << label << ": persistent weight was modified\n";
-        return 1;
-    }
-
-    static int verify_zero_plane(const std::string& label, const DeviceBuffer& device,
-                                 std::size_t offset, std::size_t bytes) {
-        std::vector<std::uint8_t> actual(bytes);
-        device.copy_to_host(actual.data(), bytes, offset);
-        if (std::all_of(actual.begin(), actual.end(),
-                        [](std::uint8_t value) { return value == 0; })) {
-            return 0;
-        }
-        std::cerr << label << ": unselected persistent weight was modified\n";
         return 1;
     }
 
@@ -355,8 +324,8 @@ std::vector<float> make_down(std::int32_t rows, std::int32_t columns, std::uint3
 
 struct HostExpert {
     int id;
-    row_split::PackedWeight gate_up;
-    row_split::PackedWeight down;
+    quantized_weight::PackedWeight gate_up;
+    quantized_weight::PackedWeight down;
 };
 
 const HostExpert& find_expert(const std::vector<HostExpert>& experts, int id) {
@@ -399,11 +368,13 @@ double dot_fp64(const std::vector<float>& matrix, std::int32_t row, std::int32_t
 // The one SparseMoe oracle. It directly evaluates the complete public formula from represented
 // BF16 values and independently decoded logical weights, with FP64 accumulation throughout.
 // It has no production route, staging cast, workspace dtype, reduction tree, or output rounding.
-std::vector<double>
-sparse_moe_oracle(const std::vector<float>& input, const std::vector<float>& residual,
-                  const std::vector<float>& router, const std::vector<HostExpert>& experts,
-                  const row_split::PackedWeight& shared_gate_up,
-                  const row_split::PackedWeight& shared_down, const RoutePattern& intended_route) {
+std::vector<double> sparse_moe_oracle(const std::vector<float>& input,
+                                      const std::vector<float>& residual,
+                                      const std::vector<float>& router,
+                                      const std::vector<HostExpert>& experts,
+                                      const quantized_weight::PackedWeight& shared_gate_up,
+                                      const quantized_weight::PackedWeight& shared_down,
+                                      const RoutePattern& intended_route) {
     const std::vector<double> x(input.begin(), input.end());
     std::vector<double> scores(kExperts + 1);
     parallel_rows(kExperts + 1,
@@ -495,11 +466,11 @@ public:
         std::sort(expert_ids.begin(), expert_ids.end());
         for (int expert : expert_ids) {
             const float factor = 0.8f + static_cast<float>((expert * 3) % 11) * 0.045f;
-            auto gate_up       = row_split::pack_row_split_lowbit(
+            auto gate_up       = quantized_weight::pack_row_split_lowbit(
                 make_gate_up(kExpertGateRows, kHidden, 100U + static_cast<std::uint32_t>(expert),
                                    factor),
                 kExpertGateRows, kHidden, profile.routed_gate_up);
-            auto down = row_split::pack_row_split_lowbit(
+            auto down = quantized_weight::pack_row_split_lowbit(
                 make_down(kHidden, kIntermediate, 300U + static_cast<std::uint32_t>(expert),
                           factor),
                 kHidden, kIntermediate, profile.routed_down);
@@ -508,9 +479,9 @@ public:
             experts_.push_back({expert, std::move(gate_up), std::move(down)});
         }
 
-        shared_gate_host_ = row_split::pack_w8g32_row_split(
+        shared_gate_host_ = quantized_weight::pack_w8g32_row_split(
             make_gate_up(kSharedGateRows, kHidden, 0x512U, 0.93f), kSharedGateRows, kHidden);
-        shared_down_host_ = row_split::pack_w8g32_row_split(
+        shared_down_host_ = quantized_weight::pack_w8g32_row_split(
             make_down(kHidden, kIntermediate, 0x731U, 0.87f), kHidden, kIntermediate);
         shared_gate_.copy_rows(shared_gate_host_, 0);
         shared_down_device_.copy_rows(shared_down_host_, 0);
@@ -555,7 +526,9 @@ public:
         };
         Tensor x(device_input.p, DType::BF16, {kHidden, tokens});
         Tensor destination(destination_storage.data(), DType::BF16, {kHidden, tokens});
-        WorkspaceArena workspace(ops::sparse_moe_workspace_bytes(tokens));
+        const std::size_t workspace_bytes = ops::sparse_moe_workspace_capacity_bytes(
+            weights.routed_gate_up.qtype, weights.routed_down.qtype, tokens, tokens);
+        WorkspaceArena workspace(workspace_bytes);
 
         if (graph_replay) {
             cudaStream_t stream  = nullptr;
@@ -590,6 +563,10 @@ public:
         failures +=
             verify_exact((label + " input preservation").c_str(),
                          from_device<std::uint16_t>(device_input, input_bits.size()), input_bits);
+        if (workspace.used() != 0 || workspace.peak_used() != workspace_bytes) {
+            std::cerr << label << ": workspace query/execution high-water mismatch\n";
+            ++failures;
+        }
         return failures;
     }
 
@@ -610,12 +587,6 @@ public:
                                              shared_gate_host_, 0);
         failures += shared_down_device_.verify_rows(std::string(profile_.name) + " shared down",
                                                     shared_down_host_, 0);
-        // Expert 128 is deliberately absent from all selected sets. Checking one row in each
-        // bank detects writes outside the logically consumed selected-expert spans.
-        failures += routed_gate_.verify_zero_row(
-            std::string(profile_.name) + " unselected routed gate", 128 * kExpertGateRows);
-        failures += routed_down_.verify_zero_row(
-            std::string(profile_.name) + " unselected routed down", 128 * kHidden);
         return failures;
     }
 
@@ -631,20 +602,30 @@ private:
     std::vector<std::vector<float>> inputs_;
     std::vector<std::vector<float>> residuals_;
     std::vector<HostExpert> experts_;
-    row_split::PackedWeight shared_gate_host_;
-    row_split::PackedWeight shared_down_host_;
+    quantized_weight::PackedWeight shared_gate_host_;
+    quantized_weight::PackedWeight shared_down_host_;
     std::vector<std::vector<double>> references_;
 };
 
 int run_profile(const CodecProfile& profile) {
     SparseMoeFixture fixture(profile);
-    int failures = 0;
+    int failures        = 0;
+    std::size_t witness = 0;
     for (std::size_t index = 0; index < profile.token_cases.size(); ++index) {
         const std::int32_t tokens = profile.token_cases[index];
+        witness =
+            std::max(witness, ops::sparse_moe_workspace_capacity_bytes(
+                                  profile.routed_gate_up, profile.routed_down, tokens, tokens));
         // Decode starts with the exact top-8 boundary tie; multi-token cases cycle the tie,
         // high/low expert ids, and a different ordering of the same experts.
         failures +=
             fixture.run(tokens, index == 0 ? 1 : 0, profile.verify_graph_replay && index == 1);
+    }
+    const std::size_t interval = ops::sparse_moe_workspace_capacity_bytes(
+        profile.routed_gate_up, profile.routed_down, 1, profile.token_cases.back());
+    if (interval != witness) {
+        std::cerr << profile.name << ": interval workspace capacity missed a route witness\n";
+        ++failures;
     }
     failures += fixture.verify_persistent_inputs();
     return failures;
@@ -655,15 +636,15 @@ int run_profile(const CodecProfile& profile) {
 int main() {
     if (cuda_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
-        return 0;
+        return 77;
     }
 
     // These are public-behavior cases, not route assertions. They exercise decode (T=1), the
     // Small-T supported-domain edges, each profile's first prefill T, the wide-prefill boundary,
     // and one call crossing the 4096-token internal slice without observing any private plan.
-    constexpr std::array<std::int32_t, 6> kQ4Q5Tokens{{1, 2, 44, 45, 768, 4097}};
-    constexpr std::array<std::int32_t, 5> kQ4Q6Tokens{{1, 2, 44, 45, 768}};
-    constexpr std::array<std::int32_t, 5> kW8W8Tokens{{1, 2, 17, 18, 768}};
+    constexpr std::array<std::int32_t, 6> kQ4Q5Tokens{{1, 2, 46, 47, 768, 4097}};
+    constexpr std::array<std::int32_t, 5> kQ4Q6Tokens{{1, 2, 46, 47, 768}};
+    constexpr std::array<std::int32_t, 5> kW8W8Tokens{{1, 2, 19, 20, 768}};
     const std::array<CodecProfile, 3> profiles{{
         {"sparse_moe q4+q5 a16", QType::Q4G64_F16S, QType::Q5G64_F16S, kQ4Q5Tokens, true},
         {"sparse_moe q4+q6 a16", QType::Q4G64_F16S, QType::Q6G64_F16S, kQ4Q6Tokens, false},

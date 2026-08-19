@@ -53,14 +53,14 @@ const char* w8_gdn_input_schedule_name(W8GdnInputScheduleId schedule) noexcept {
     return "gdn_input_proj.w8.unknown";
 }
 
-const char* w8_gdn_input_snapshot_schedule_name(W8GdnInputSnapshotScheduleId schedule) noexcept {
+const char* w8_gdn_input_conv_schedule_name(W8GdnInputConvScheduleId schedule) noexcept {
     switch (schedule) {
-    case W8GdnInputSnapshotScheduleId::DecodeFused:
-        return "gdn_input_proj_conv_snapshot.w8.decode.fused";
-    case W8GdnInputSnapshotScheduleId::SplitKMmaFused:
-        return "gdn_input_proj_conv_snapshot.w8.mma.splitk.fused";
-    case W8GdnInputSnapshotScheduleId::Composed:
-        return "gdn_input_proj_conv_snapshot.w8.composed";
+    case W8GdnInputConvScheduleId::DecodeFused:
+        return "gdn_input_proj_conv.w8.decode.fused";
+    case W8GdnInputConvScheduleId::SplitKMmaFused:
+        return "gdn_input_proj_conv.w8.mma.splitk.fused";
+    case W8GdnInputConvScheduleId::Materialized:
+        return "gdn_input_proj_conv.w8.materialized";
     }
     return "gdn_input_proj_conv_snapshot.w8.unknown";
 }
@@ -74,27 +74,21 @@ W8GdnInputPlan w8_gdn_input_resolve_plan(const W8GdnInputProblem& problem) {
         throw std::invalid_argument("W8 GDN input: exact problem or column count is not admitted");
     }
     for (const RouteSpec& route : kRoutes) {
-        if (problem.cols >= route.first && problem.cols <= route.last) {
-            return {route.schedule, 0};
-        }
+        if (problem.cols >= route.first && problem.cols <= route.last) { return {route.schedule}; }
     }
     throw std::logic_error("W8 GDN input: admitted problem has no covering route");
 }
 
-W8GdnInputSnapshotPlan w8_gdn_input_snapshot_resolve_plan(const W8GdnInputProblem& problem) {
-    if (!w8_gdn_input_admits(problem)) {
+W8GdnInputConvPlan w8_gdn_input_conv_resolve_plan(const W8GdnInputProblem& problem,
+                                                  std::int32_t batch_size) {
+    if (!w8_gdn_input_admits(problem) || batch_size <= 0 || batch_size > 8) {
         throw std::invalid_argument(
-            "W8 GDN input snapshot: exact problem or column count is not admitted");
+            "W8 GDN input conv: exact problem or column count is not admitted");
     }
-    if (problem.cols == 1) { return {W8GdnInputSnapshotScheduleId::DecodeFused}; }
-    if (problem.cols <= 16) { return {W8GdnInputSnapshotScheduleId::SplitKMmaFused}; }
-    return {W8GdnInputSnapshotScheduleId::Composed};
-}
-
-std::size_t w8_gdn_input_capacity_workspace_bytes(std::int32_t qkv_rows, std::int32_t z_rows,
-                                                  std::int32_t max_cols) {
-    (void)w8_gdn_input_resolve_plan({2048, qkv_rows, z_rows, qkv_rows + z_rows, 2048, max_cols});
-    return 0;
+    if (batch_size > 1) { return {W8GdnInputConvScheduleId::Materialized}; }
+    if (problem.cols == 1) { return {W8GdnInputConvScheduleId::DecodeFused}; }
+    if (problem.cols <= 16) { return {W8GdnInputConvScheduleId::SplitKMmaFused}; }
+    return {W8GdnInputConvScheduleId::Materialized};
 }
 
 void w8_gdn_input_dispatch(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,

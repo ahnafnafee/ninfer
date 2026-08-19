@@ -1,7 +1,7 @@
 #pragma once
 
 #include "ops/op_tester.h"
-#include "ops/row_split_pack.h"
+#include "ops/quantized_weight.h"
 
 #include <algorithm>
 #include <cmath>
@@ -17,9 +17,17 @@
 
 namespace ninfer::test::input_projection {
 
-inline std::vector<std::int32_t> sampled_rows(std::int32_t rows) {
+inline std::vector<std::int32_t> sampled_rows(std::int32_t rows, std::int32_t sample_count = 7) {
+    if (rows <= 0 || sample_count <= 0) {
+        throw std::invalid_argument("sampled_rows requires positive extents");
+    }
     std::vector<std::int32_t> result;
-    for (const std::int32_t row : {0, 1, rows / 4, rows / 2, (3 * rows) / 4, rows - 2, rows - 1}) {
+    const std::int32_t selected = std::min(rows, sample_count);
+    for (std::int32_t sample = 0; sample < selected; ++sample) {
+        const std::int32_t row =
+            selected == 1 ? 0
+                          : static_cast<std::int32_t>(
+                                (static_cast<std::int64_t>(rows - 1) * sample) / (selected - 1));
         if (std::find(result.begin(), result.end(), row) == result.end()) { result.push_back(row); }
     }
     return result;
@@ -35,7 +43,7 @@ inline std::vector<float> make_bf16_activation(std::int32_t rows, std::int32_t t
 
 class DevicePackedWeight {
 public:
-    explicit DevicePackedWeight(row_split::PackedWeight packed)
+    explicit DevicePackedWeight(quantized_weight::PackedWeight packed)
         : host(std::move(packed)), device(host.payload.size()) {
         device.copy_from_host(host.payload.data(), host.payload.size());
     }
@@ -50,7 +58,7 @@ public:
         return 1;
     }
 
-    row_split::PackedWeight host;
+    quantized_weight::PackedWeight host;
     DeviceBuffer device;
 };
 
@@ -120,9 +128,9 @@ private:
 
 inline std::vector<double> gather_rows(const std::vector<double>& full, std::int32_t full_rows,
                                        std::int32_t row_offset, std::int32_t rows,
-                                       std::int32_t tokens) {
+                                       std::int32_t tokens, std::int32_t sample_count = 7) {
     std::vector<double> gathered;
-    const std::vector<std::int32_t> selected = sampled_rows(rows);
+    const std::vector<std::int32_t> selected = sampled_rows(rows, sample_count);
     gathered.reserve(selected.size() * static_cast<std::size_t>(tokens));
     for (const std::int32_t local_row : selected) {
         const std::int32_t global_row = row_offset + local_row;
@@ -133,17 +141,16 @@ inline std::vector<double> gather_rows(const std::vector<double>& full, std::int
     return gathered;
 }
 
-inline std::vector<double> projection_oracle(const row_split::PackedWeight& weight,
-                                             std::int32_t weight_row_offset,
-                                             std::int32_t output_rows,
-                                             const std::vector<float>& activation,
-                                             std::int32_t hidden, std::int32_t tokens) {
+inline std::vector<double>
+projection_oracle(const quantized_weight::PackedWeight& weight, std::int32_t weight_row_offset,
+                  std::int32_t output_rows, const std::vector<float>& activation,
+                  std::int32_t hidden, std::int32_t tokens, std::int32_t sample_count = 7) {
     std::vector<double> expected;
-    const std::vector<std::int32_t> selected = sampled_rows(output_rows);
+    const std::vector<std::int32_t> selected = sampled_rows(output_rows, sample_count);
     expected.reserve(selected.size() * static_cast<std::size_t>(tokens));
     for (const std::int32_t local_row : selected) {
         for (std::int32_t token = 0; token < tokens; ++token) {
-            expected.push_back(row_split::dot_row_split_lowbit_fp64(
+            expected.push_back(quantized_weight::dot_fp64(
                 weight, weight_row_offset + local_row,
                 activation.data() + static_cast<std::size_t>(token) * hidden, hidden));
         }

@@ -7,17 +7,21 @@ ranges come from [`artifact-container.md`](artifact-container.md).
 
 ## 1. Registered identities
 
-The initial storage registry contains exactly these identities:
+The storage registry contains exactly these identities:
 
 | Identity | Kind | Compatible numeric formats | Logical shape | Object alignment |
 |---|---|---|---|---:|
 | `contiguous-le-v1` | tensor layout | `BF16`, `FP32`, `I32` | rank `0..16` | 256 bytes |
 | `row-split-k128-v1` | tensor layout | `Q4G64_F16S`, `Q5G64_F16S`, `Q6G64_F16S`, `W8G32_F16S` | rank 2 `[N,K]` | 256 bytes |
+| `blockscale-k16-m128x4-v1` | tensor layout | `NVFP4` | rank 2 `[N,K]`, `N % 128 == 0`, `K % 64 == 0` | 256 bytes |
+| `row-scale-v1` | tensor layout | `FP8_E4M3FN_ROW_BF16S` | rank 2 `[N,K]` | 256 bytes |
 | `raw-bytes-v1` | resource encoding | not applicable | nonempty byte string | 1 byte |
 
 These are closed identities, not templates. A format/layout combination not present in the table is
-unsupported. In particular, a direct format cannot use `row-split-k128-v1`, and a grouped format
-cannot use `contiguous-le-v1`.
+unsupported. In particular, a direct format cannot use a quantized layout, grouped
+signed-integer formats cannot use `contiguous-le-v1`, and `NVFP4` cannot use
+`row-split-k128-v1`. `FP8_E4M3FN_ROW_BF16S` can use only `row-scale-v1`; a bare E4M3FN code plane
+is not a compatible direct tensor.
 
 Object alignment applies to the object's payload-relative `offset` in the `.ninfer` JSON. Internal
 plane offsets and padding belong to the selected layout. Inter-object padding belongs to the
@@ -247,7 +251,80 @@ the same plane order, with the plane offsets and zero padding recomputed from Se
 `N=row_count`. This produces another valid `row-split-k128-v1` tensor without decoding or repacking
 individual codes.
 
-## 4. `raw-bytes-v1`
+## 4. `blockscale-k16-m128x4-v1`
+
+This layout stores only rank-two `NVFP4` matrices `[N,K]` satisfying:
+
+```text
+N > 0
+K > 0
+N % 128 == 0
+K % 64 == 0
+```
+
+It adds no logical padding. Let:
+
+```text
+code_plane_bytes      = N * K / 2
+scale_plane_offset    = align_up(code_plane_bytes, 256)
+scale_plane_bytes     = N * K / 16
+weight_divisor_offset = scale_plane_offset + scale_plane_bytes
+payload_bytes         = weight_divisor_offset + 4
+```
+
+The payload is a row-major E2M1 packed-code plane, zero padding to `scale_plane_offset`, a
+swizzled E4M3FN scale plane, and the little-endian FP32 weight-divisor word. Within each packed code
+byte, the low nibble is the smaller K coordinate and the high nibble is the next coordinate.
+
+For logical row `n`, scale-group coordinate `g=floor(k/16)`, and `K_tiles=K/64`, define:
+
+```text
+row_tile   = floor(n / 128)
+row_inner  = n % 128
+scale_tile = floor(g / 4)
+scale_lane = g % 4
+```
+
+The scale word's byte offset within the scale plane is:
+
+```text
+(row_tile * K_tiles + scale_tile) * 512
++ (row_inner % 32) * 16
++ floor(row_inner / 32) * 4
++ scale_lane
+```
+
+Layout decoding must recover the original packed E2M1 words, natural `[N,K/16]` E4M3FN scale-word
+matrix, and exact divisor word. It never decodes and re-encodes either floating-point format.
+
+## 5. `row-scale-v1`
+
+`row-scale-v1` stores only rank-two `FP8_E4M3FN_ROW_BF16S` matrices `[N,K]` with positive
+dimensions. It adds no logical or physical matrix padding. Let:
+
+```text
+code_plane_bytes   = N * K
+scale_plane_offset = align_up(code_plane_bytes, 256)
+scale_plane_bytes  = N * 2
+payload_bytes      = scale_plane_offset + scale_plane_bytes
+```
+
+The payload begins with one row-major E4M3FN byte per logical weight. Coordinate `[n,k]` is stored
+at code-plane offset `n * K + k`. Zero bytes fill the interval from `code_plane_bytes` to
+`scale_plane_offset`.
+
+The scale plane contains one little-endian BF16 word per logical row in increasing `n` order. Scale
+word `n` begins at `scale_plane_offset + 2 * n`. The layout neither converts the BF16 multiplier nor
+combines it with its E4M3FN row. Code and scale validity and represented-weight reconstruction are
+defined by `FP8_E4M3FN_ROW_BF16S` in [`tensor-formats.md`](tensor-formats.md).
+
+A logical row view consists of its `K` consecutive code bytes and its one BF16 scale word; those two
+spans are not one assumed-contiguous payload range. A standalone consecutive slice or row gather is
+encoded by concatenating the selected code rows, recomputing the scale-plane alignment for the new
+row count, and appending the selected scale words in the same row order. It does not decode or
+requantize either plane.
+
+## 6. `raw-bytes-v1`
 
 `raw-bytes-v1` is a required-resource encoding, not a tensor layout. Its enclosing object payload is
 the resource byte string itself:
@@ -262,13 +339,17 @@ trailing padding. The resource object's JSON `bytes` is its exact nonzero length
 returns the complete span unchanged. A model contract assigns a resource name and interprets those
 bytes; the common encoding does not infer that meaning from the name.
 
-## 5. Decode boundary
+## 7. Decode boundary
 
 Layout decoding yields only persistent logical words:
 
 - `contiguous-le-v1` yields the direct BF16, FP32, or I32 words in logical coordinate order;
 - `row-split-k128-v1` yields the grouped signed codes and binary16 scales for logical columns
   `0..K-1`, discarding physical columns `K..K_pad-1`;
+- `blockscale-k16-m128x4-v1` yields the packed E2M1 words, natural E4M3FN group-scale words, and
+  matrix-level FP32 weight divisor;
+- `row-scale-v1` yields the natural row-major E4M3FN code words and one BF16 multiplier per logical
+  row;
 - `raw-bytes-v1` yields the enclosing resource bytes.
 
 Dequantized values follow the reconstruction rule in `tensor-formats.md`. This document does

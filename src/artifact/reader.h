@@ -26,11 +26,15 @@ enum class NumericFormat {
     Q5G64_F16S,
     Q6G64_F16S,
     W8G32_F16S,
+    NVFP4,
+    FP8_E4M3FN_ROW_BF16S,
 };
 
 enum class StorageLayout {
     ContiguousLeV1,
     RowSplitK128V1,
+    BlockScaleK16M128x4V1,
+    RowScaleV1,
 };
 
 enum class ResourceEncoding {
@@ -64,6 +68,31 @@ struct RowSplitGeometry {
 
 RowSplitGeometry row_split_geometry(NumericFormat format, std::span<const std::uint64_t> shape);
 
+struct BlockScaleGeometry {
+    std::uint64_t rows                  = 0;
+    std::uint64_t columns               = 0;
+    std::uint64_t groups_per_row        = 0;
+    std::uint64_t k_tiles               = 0;
+    std::uint64_t code_plane_bytes      = 0;
+    std::uint64_t scale_plane_offset    = 0;
+    std::uint64_t scale_plane_bytes     = 0;
+    std::uint64_t weight_divisor_offset = 0;
+    std::uint64_t encoded_bytes         = 0;
+};
+
+BlockScaleGeometry block_scale_geometry(NumericFormat format, std::span<const std::uint64_t> shape);
+
+struct RowScaleGeometry {
+    std::uint64_t rows               = 0;
+    std::uint64_t columns            = 0;
+    std::uint64_t code_plane_bytes   = 0;
+    std::uint64_t scale_plane_offset = 0;
+    std::uint64_t scale_plane_bytes  = 0;
+    std::uint64_t encoded_bytes      = 0;
+};
+
+RowScaleGeometry row_scale_geometry(NumericFormat format, std::span<const std::uint64_t> shape);
+
 struct TensorDescriptor {
     std::string name;
     std::vector<std::uint64_t> shape;
@@ -91,6 +120,13 @@ struct PayloadSpan {
     std::span<const std::byte> data;
 };
 
+struct ArtifactIdentity {
+    std::string model_id;
+    std::string weights_id;
+
+    bool operator==(const ArtifactIdentity&) const = default;
+};
+
 class Reader {
 public:
     static constexpr std::size_t direct_io_alignment = 4096;
@@ -103,7 +139,7 @@ public:
     Reader(const Reader&)            = delete;
     Reader& operator=(const Reader&) = delete;
 
-    const std::string& model_id() const noexcept;
+    const ArtifactIdentity& identity() const noexcept;
     const std::vector<ObjectDescriptor>& objects() const noexcept;
     const ObjectDescriptor* find(std::string_view name) const noexcept;
 

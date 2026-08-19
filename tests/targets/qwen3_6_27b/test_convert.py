@@ -7,6 +7,7 @@ import torch
 
 from tools.artifact.container import (
     Artifact,
+    ArtifactIdentity,
     ArtifactWriter,
     ResourceSpec,
     TensorSpec,
@@ -38,7 +39,6 @@ def test_complete_inventory_has_one_preplanned_object_directory():
     expected_names = tuple(spec.name for spec in inventory.OBJECT_SPECS)
     assert tuple(spec.name for spec in plan.specs) == expected_names
     assert tuple(obj.name for obj in plan.objects) == expected_names
-    assert plan.payload_span_bytes == plan.objects[-1].offset + plan.objects[-1].bytes
 
 
 def test_synthetic_encode_seam_and_descriptive_report(tmp_path):
@@ -77,7 +77,11 @@ def test_synthetic_encode_seam_and_descriptive_report(tmp_path):
         ),
     )
     path = tmp_path / "mini.ninfer"
-    with ArtifactWriter(path, "mini-model", artifact_specs) as writer:
+    with ArtifactWriter(
+        path,
+        ArtifactIdentity("mini-model", "mini-weights"),
+        artifact_specs,
+    ) as writer:
         writer.write("frontend/test.json", b"{}")
         writer.write(direct_target.name, direct_payload)
         writer.write(quant_target.name, quant_payload)
@@ -122,7 +126,10 @@ def test_synthetic_encode_seam_and_descriptive_report(tmp_path):
         revision="test-revision",
         environment={"python": "test", "torch": "test", "device": "cpu"},
     )
-    assert report["model_id"] == inventory.MODEL_ID
+    assert report["identity"] == {
+        "model_id": inventory.MODEL_ID,
+        "weights_id": inventory.WEIGHTS_ID,
+    }
     assert report["target_key"] == inventory.TARGET_KEY
     assert report["recipe_id"] == convert.RECIPE_ID
     assert report["source"]["model_path"].endswith("/model")

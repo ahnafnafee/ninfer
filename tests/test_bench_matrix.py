@@ -5,18 +5,19 @@ import json
 from tools.bench.run_ninfer_bench_matrix import BenchCase, report_rows
 
 
-def test_schema_v8_report_is_flattened_for_matrix_summary(tmp_path) -> None:
+def test_schema_v11_report_is_flattened_for_matrix_summary(tmp_path) -> None:
     report_path = tmp_path / "report.json"
     report_path.write_text(
         json.dumps(
             {
-                "schema_version": 8,
+                "schema_version": 11,
                 "artifact_type": "ninfer_bench_report",
                 "tool": "ninfer_bench",
                 "artifact": {"path": "model.ninfer"},
                 "environment": {"gpu_name": "RTX 5090"},
                 "load": {
                     "target": "qwen3_6_27b",
+                    "weights_id": "nvfp4",
                     "load_seconds": 2.5,
                     "upload_seconds": 2.0,
                     "artifact_bytes_read": 17_500_000_000,
@@ -24,10 +25,13 @@ def test_schema_v8_report_is_flattened_for_matrix_summary(tmp_path) -> None:
                     "peak_staging_bytes": 134_217_728,
                 },
                 "memory": {
+                    "kv_capacity": 8192,
                     "kv_payload_bytes": 123_456,
                     "weights": {"capacity_bytes": 17_400_000_000},
                     "sequence": {"capacity_bytes": 2_000_000_000},
                     "workspace": {"capacity_bytes": 100_000_000},
+                    "request_transient": {"capacity_bytes": 50_000_000},
+                    "cuda_graph_allowance_bytes": 150_000_000,
                 },
                 "config": {
                     "max_context": 4096,
@@ -48,6 +52,7 @@ def test_schema_v8_report_is_flattened_for_matrix_summary(tmp_path) -> None:
                         "n_gen": 3,
                         "requested_output_tokens": 4,
                         "workspace_peak_bytes": 1_048_576,
+                        "workspace_allocator_peak_bytes": 524_288,
                         "decode_output_tok_s_mean": 4.5,
                         "decode_engine_tok_s_mean": 7.5,
                         "total_seconds_mean": 0.875,
@@ -80,8 +85,9 @@ def test_schema_v8_report_is_flattened_for_matrix_summary(tmp_path) -> None:
         "tg3",
         "tg",
     )
-    assert (row["target"], row["artifact_path"], row["gpu_name"]) == (
+    assert (row["target"], row["weights_id"], row["artifact_path"], row["gpu_name"]) == (
         "qwen3_6_27b",
+        "nvfp4",
         "model.ninfer",
         "RTX 5090",
     )
@@ -90,9 +96,13 @@ def test_schema_v8_report_is_flattened_for_matrix_summary(tmp_path) -> None:
         True,
     )
     assert row["decode_graph_prime_output_tokens"] == 13
+    assert row["kv_capacity"] == 8192
     assert row["host_to_device_bytes"] == 17_400_000_000
     assert row["workspace_capacity_bytes"] == 100_000_000
+    assert row["request_transient_capacity_bytes"] == 50_000_000
+    assert row["cuda_graph_allowance_bytes"] == 150_000_000
     assert row["workspace_peak_bytes"] == 1_048_576
+    assert row["workspace_allocator_peak_bytes"] == 524_288
     assert row["decode_output_tok_s_mean"] == 4.5
     assert row["decode_engine_tok_s_mean"] == 7.5
     assert row["spec_fallback_steps"] == 3

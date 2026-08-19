@@ -4,7 +4,7 @@
 // weight tile while N-groups cover disjoint column ranges. Output owns the
 // physical direct-write policy.
 
-#include "ops/linear/w8/w8_rowsplit_gemm_exact_t_splitk.cuh"
+#include "ops/linear/w8/w8_small_t_mma.cuh"
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -13,7 +13,8 @@
 
 namespace ninfer::ops::detail {
 
-template <int Hidden, int TileCols, int KSplits, int NGroups, int MinBlocks, class Output>
+template <int Hidden, int TileCols, int KSplits, int NGroups, int MinBlocks, class Output,
+          bool AddResidual = false>
 __global__
 __launch_bounds__(KSplits* NGroups * 32, MinBlocks) void w8_rowsplit_medium_t_splitk_kernel(
     const __nv_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ codes,
@@ -27,7 +28,7 @@ __launch_bounds__(KSplits* NGroups * 32, MinBlocks) void w8_rowsplit_medium_t_sp
     constexpr int kWarpCols    = TileCols / NGroups;
     constexpr int kNt          = kWarpCols / 8;
     constexpr unsigned kMask   = 0xffffffffu;
-    static_assert(KSplits == 2 || KSplits == 4);
+    static_assert(KSplits == 2 || KSplits == 4 || KSplits == 8);
     static_assert(TileCols % NGroups == 0 && kWarpCols % 8 == 0);
     static_assert(Hidden % kGroupK == 0 && kKernelWarps <= 32);
 
@@ -50,8 +51,7 @@ __launch_bounds__(KSplits* NGroups * 32, MinBlocks) void w8_rowsplit_medium_t_sp
         for (int item = lane; item < local_cols * (kTileK / 8); item += 32) {
             const int col = item / (kTileK / 8);
             const int k8  = item - col * (kTileK / 8);
-            auto* dst =
-                &b_shared[warp][col * kTileK + w8_exact_t_swizzle_64(col, k8 * 8)];
+            auto* dst     = &b_shared[warp][col * kTileK + w8_small_t_swizzle_64(col, k8 * 8)];
             cp_async<16, Cache::cg>(
                 dst, &x[static_cast<std::int64_t>(n_base + col) * Hidden + k0 + k8 * 8]);
         }
@@ -114,33 +114,31 @@ __launch_bounds__(KSplits* NGroups * 32, MinBlocks) void w8_rowsplit_medium_t_sp
             }
 #pragma unroll
             for (int ki = 0; ki < 2; ++ki) {
-                const int ks       = group * 2 + ki;
-                const int code_col = ks * 16 + lid * 2;
+                const int ks              = group * 2 + ki;
+                const int code_col        = ks * 16 + lid * 2;
                 const auto load_code_pair = [&](int code_row, int col) {
                     const int chunk  = (warp_koff + col) >> 4;
                     const int offset = (chunk ^ (code_row & 7)) * 16 + (col & 15);
                     return static_cast<unsigned>(
                         *reinterpret_cast<const unsigned short*>(&code_shared[code_row][offset]));
                 };
-                const unsigned af0 =
-                    w8_exact_t_bf16_pair_from_s8(load_code_pair(gid, code_col));
+                const unsigned af0 = w8_small_t_bf16_pair_from_s8(load_code_pair(gid, code_col));
                 const unsigned af1 =
-                    w8_exact_t_bf16_pair_from_s8(load_code_pair(gid + 8, code_col));
+                    w8_small_t_bf16_pair_from_s8(load_code_pair(gid + 8, code_col));
                 const unsigned af2 =
-                    w8_exact_t_bf16_pair_from_s8(load_code_pair(gid, code_col + 8));
+                    w8_small_t_bf16_pair_from_s8(load_code_pair(gid, code_col + 8));
                 const unsigned af3 =
-                    w8_exact_t_bf16_pair_from_s8(load_code_pair(gid + 8, code_col + 8));
+                    w8_small_t_bf16_pair_from_s8(load_code_pair(gid + 8, code_col + 8));
 #pragma unroll
                 for (int ni = 0; ni < kNt; ++ni) {
                     unsigned bf0, bf1;
                     const int br = ni * 8 + b_rin;
                     ldmatrix_x2(
                         bf0, bf1,
-                        smem_addr(&b_shared[warp]
-                                          [br * kTileK +
-                                           w8_exact_t_swizzle_64(br, ks * 16 + b_koff)]));
-                    mma_bf16(group_acc[ni][0], group_acc[ni][1], group_acc[ni][2],
-                             group_acc[ni][3], af0, af1, af2, af3, bf0, bf1);
+                        smem_addr(&b_shared[warp][br * kTileK +
+                                                  w8_small_t_swizzle_64(br, ks * 16 + b_koff)]));
+                    mma_bf16(group_acc[ni][0], group_acc[ni][1], group_acc[ni][2], group_acc[ni][3],
+                             af0, af1, af2, af3, bf0, bf1);
                 }
             }
             const unsigned top_bits = group == 0 ? top_scale_pair & 0xffffu : top_scale_pair >> 16;
@@ -185,43 +183,49 @@ __launch_bounds__(KSplits* NGroups * 32, MinBlocks) void w8_rowsplit_medium_t_sp
             acc[ni][1] += partner.y;
             acc[ni][2] += partner.z;
             acc[ni][3] += partner.w;
-            if constexpr (KSplits == 4) {
-                if (k_split == 2) {
-                    store_vec(partial + ((warp * kNt + ni) * 32 + lane) * 4,
-                              make_float4(acc[ni][0], acc[ni][1], acc[ni][2], acc[ni][3]));
-                }
+            if (k_split != 0) {
+                store_vec(partial + ((warp * kNt + ni) * 32 + lane) * 4,
+                          make_float4(acc[ni][0], acc[ni][1], acc[ni][2], acc[ni][3]));
             }
         }
     }
 
-    if constexpr (KSplits == 4) {
+    if constexpr (KSplits > 2) {
         __syncthreads();
         if (k_split == 0) {
 #pragma unroll
             for (int ni = 0; ni < kNt; ++ni) {
-                const int partner_warp = n_group * KSplits + 2;
-                const float4 partner =
-                    load_vec<float4>(partial + ((partner_warp * kNt + ni) * 32 + lane) * 4);
-                acc[ni][0] += partner.x;
-                acc[ni][1] += partner.y;
-                acc[ni][2] += partner.z;
-                acc[ni][3] += partner.w;
+#pragma unroll
+                for (int split = 2; split < KSplits; split += 2) {
+                    const int partner_warp = n_group * KSplits + split;
+                    const float4 partner =
+                        load_vec<float4>(partial + ((partner_warp * kNt + ni) * 32 + lane) * 4);
+                    acc[ni][0] += partner.x;
+                    acc[ni][1] += partner.y;
+                    acc[ni][2] += partner.z;
+                    acc[ni][3] += partner.w;
+                }
             }
         }
     }
 
     if (k_split == 0) {
         const W8OutputTile output_tile = output.tile(cta_row0);
+        const auto store               = [&](int row, int col, float value) {
+            __nv_bfloat16* destination = output_tile.at(row, col);
+            if constexpr (AddResidual) { value += __bfloat162float(*destination); }
+            *destination = __float2bfloat16_rn(value);
+        };
 #pragma unroll
         for (int ni = 0; ni < kNt; ++ni) {
             const int col0 = n_base + ni * 8 + 2 * lid;
             if (col0 < active_cols) {
-                *output_tile.at(cta_row0 + gid, col0)     = __float2bfloat16_rn(acc[ni][0]);
-                *output_tile.at(cta_row0 + gid + 8, col0) = __float2bfloat16_rn(acc[ni][2]);
+                store(cta_row0 + gid, col0, acc[ni][0]);
+                store(cta_row0 + gid + 8, col0, acc[ni][2]);
             }
             if (col0 + 1 < active_cols) {
-                *output_tile.at(cta_row0 + gid, col0 + 1)     = __float2bfloat16_rn(acc[ni][1]);
-                *output_tile.at(cta_row0 + gid + 8, col0 + 1) = __float2bfloat16_rn(acc[ni][3]);
+                store(cta_row0 + gid, col0 + 1, acc[ni][1]);
+                store(cta_row0 + gid + 8, col0 + 1, acc[ni][3]);
             }
         }
     }

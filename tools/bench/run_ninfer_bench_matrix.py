@@ -40,7 +40,7 @@ CONTEXT_CORE = ((512, 512), (2048, 512), (8192, 512))
 CONTEXT_FULL_EXTRA = ((32768, 256), (65536, 128))
 PRIMARY_KS = (0, 3, 5)
 SWEEP_KS = (0, 1, 2, 3, 4, 5)
-REPORT_SCHEMA_VERSION = 8
+REPORT_SCHEMA_VERSION = 11
 REPORT_ARTIFACT_TYPE = "ninfer_bench_report"
 REPORT_TOOL = "ninfer_bench"
 
@@ -269,6 +269,7 @@ def report_rows(report_path: Path, case: BenchCase) -> list[dict[str, Any]]:
     weights_memory = memory.get("weights", {})
     sequence_memory = memory.get("sequence", {})
     workspace_memory = memory.get("workspace", {})
+    request_transient_memory = memory.get("request_transient", {})
     rows = []
     for test in report.get("tests", []):
         speculative = test.get("speculative", {})
@@ -282,8 +283,10 @@ def report_rows(report_path: Path, case: BenchCase) -> list[dict[str, Any]]:
             "n_gen": test.get("n_gen"),
             "requested_output_tokens": test.get("requested_output_tokens"),
             "target": load.get("target"),
+            "weights_id": load.get("weights_id"),
             "artifact_path": report.get("artifact", {}).get("path"),
             "max_context": config.get("max_context"),
+            "kv_capacity": memory.get("kv_capacity"),
             "prefill_chunk": config.get("prefill_chunk"),
             "kv_cache": config.get("kv_cache"),
             "mtp_draft_tokens": config.get("mtp_draft_tokens"),
@@ -304,7 +307,10 @@ def report_rows(report_path: Path, case: BenchCase) -> list[dict[str, Any]]:
             "weights_capacity_bytes": weights_memory.get("capacity_bytes"),
             "sequence_capacity_bytes": sequence_memory.get("capacity_bytes"),
             "workspace_capacity_bytes": workspace_memory.get("capacity_bytes"),
+            "request_transient_capacity_bytes": request_transient_memory.get("capacity_bytes"),
+            "cuda_graph_allowance_bytes": memory.get("cuda_graph_allowance_bytes"),
             "workspace_peak_bytes": test.get("workspace_peak_bytes"),
+            "workspace_allocator_peak_bytes": test.get("workspace_allocator_peak_bytes"),
             "prefill_tok_s_mean": test.get("prefill_tok_s_mean"),
             "prefill_tok_s_stddev": test.get("prefill_tok_s_stddev"),
             "decode_output_tok_s_mean": test.get("decode_output_tok_s_mean"),
@@ -366,7 +372,7 @@ def write_manifest(
 ) -> None:
     manifest = {
         "artifact_type": "ninfer_bench_matrix_run",
-        "schema_version": 2,
+        "schema_version": 3,
         "created_at_utc": dt.datetime.now(dt.UTC).isoformat(),
         "preset": args.preset,
         "primary_mtp_draft_tokens": 3,

@@ -12,11 +12,29 @@ benchmark 只测量：
 ninfer::ops::linear(x, w, out, policy, workspace, stream)
 ```
 
+这是一个长期保留的 public benchmark。single、sweep、suite 和 profile 的被测调用都必须
+经过上述公开入口；fixture 可以按公开 weight format 构造输入，但 benchmark 不得包含
+Linear 私有 launcher/plan/dispatch 头，不得调用 `ninfer::ops::detail`，也不得提供
+candidate、kernel 或 route forcing 选项。
+
 Q4/Q5/Q6/W8 LinearAdd、LinearSwiGLU、LinearPair 和其他 fused Ops 不属于这个
 benchmark。它们继续由各自的 benchmark 独立测量。
 
-当前只有 A16 pure Linear route。benchmark 不提供虚假的 BF16、A8 或 A4 选项；只有
-相应 production route、数值资格和硬件规格参照同时存在后，才增加新的执行类型。
+Q4/Q5/Q6/W8 和 BF16_CTRL 使用现有 A16 route。以下 NVFP4 exact problem 同时支持 A16
+与 A4 policy，并作为永久开发 surface 使用，不加入 model suite：
+
+```text
+[14336,5120]  attention input
+[16384,5120]  GDN input
+[34816,5120]  MLP gate/up development parent
+[ 5120,6144]  attention/GDN output
+[ 5120,17408] MLP down
+```
+
+`--policy a4` 测量完整 public 调用，由 production resolver 根据 exact geometry 与 T
+选择已经资格化的 A16 或 A4 route。benchmark 不复制或推断该 private 选择。默认 prefill
+chunk `T=1024` 是 AllowA4 surface 的首要性能点；更大 T 只用于确认正 T 合同和 route
+的可扩展性。
 
 ## 1. 使用场景
 
@@ -34,6 +52,54 @@ benchmark。它们继续由各自的 benchmark 独立测量。
 
 数字 `(N,K)` 是主入口。benchmark 不复制 production selector 的完整 shape admission
 表；不支持的 point 由 public `linear()` 及其 format selector 拒绝。
+
+一个 BF16 decode exact point 的命令是：
+
+```bash
+./build/bench/ninfer_linear_bench \
+  --qtype bf16 --policy a16 \
+  --n 14336 --k 5120 --t 1
+```
+
+NVFP4 的永久 A16 decode point 是：
+
+```bash
+./build/bench/ninfer_linear_bench \
+  --qtype nvfp4 --policy a16 \
+  --n 14336 --k 5120 --t 1
+```
+
+其主要 W4A4 MMA point 是：
+
+```bash
+./build/bench/ninfer_linear_bench \
+  --qtype nvfp4 --policy a4 \
+  --n 14336 --k 5120 --t 1024
+```
+
+其余四个永久 NVFP4 problem 使用同一数字入口，例如：
+
+```bash
+./build/bench/ninfer_linear_bench \
+  --qtype nvfp4 --policy a4 \
+  --n 16384 --k 5120 --t 1024
+
+./build/bench/ninfer_linear_bench \
+  --qtype nvfp4 --policy a4 \
+  --n 34816 --k 5120 --t 1024
+
+./build/bench/ninfer_linear_bench \
+  --qtype nvfp4 --policy a4 \
+  --n 5120 --k 6144 --t 1024
+
+./build/bench/ninfer_linear_bench \
+  --qtype nvfp4 --policy a4 \
+  --n 5120 --k 17408 --t 1024
+```
+
+workspace 在 timed region 前按 public capacity query 分配；activation quantization 和
+GEMM 的全部 launch 与流量都在一次 timed `linear()` 内。预量化后只计 GEMM 的结果不是
+这个 benchmark 的 production 指标。
 
 ### 1.2 NCU 单点
 
@@ -85,8 +151,9 @@ Vision step domain 可以直接表达为：
 ```
 
 每个 T 输出相邻点的 median latency 变化。sweep 用于发现不合理耗时阶跃、观察已有
-route seam，并为独立的 route 测量任务提供边界依据；它不设置自动性能 gate，也不在
-benchmark 中复制 selector 或 candidate-legality 表。
+production route seam，并为独立的 route 测量任务提供线索；每个点仍只调用 public
+Linear。它不比较强制候选、不设置自动性能 gate，也不在 benchmark 中复制 selector、
+crossover 或 candidate-legality 表。
 
 ### 1.4 典型模型 suite
 
@@ -205,7 +272,6 @@ group points by (qtype, policy, N, K)
  v
 allocate and initialize one packed weight
 allocate x/out for max T in the group
-create one WorkspaceArena
  |
  v
 for each T:
@@ -215,7 +281,7 @@ for each T:
     time public ops::linear()
  |
  v
-derive model bytes, useful FLOPs and fixed-spec ratios
+derive model bytes, useful FLOPs, fixed-spec ratios and measured-read ratio
  |
  v
 compact table and optional CSV
@@ -242,6 +308,8 @@ format weight bytes 是 kernel 需要消费的各存储平面之和，不包含 
 | Q5G64_F16S | 64 | `32 low + 8 high + 2 scale` | `groups * 42` |
 | Q6G64_F16S | 64 | `32 low + 16 high + 2 scale` | `groups * 50` |
 | W8G32_F16S | 32 | `32 code + 2 scale` | `groups * 34` |
+| NVFP4 | 16 | `8 code + 1 E4M3 scale` | `groups * 9` |
+| BF16_CTRL | — | direct BF16 | `2 * N * K` |
 
 一次 Linear 的理论最低流量为：
 
@@ -249,6 +317,7 @@ format weight bytes 是 kernel 需要消费的各存储平面之和，不包含 
 model_bytes = weight_bytes + 2*K*T + 2*N*T
 effective_GB/s = model_bytes / seconds / 1e9
 dram_spec_pct = effective_GB/s / 1792 * 100
+read_ceiling_pct = effective_GB/s / 1674.5 * 100
 ```
 
 这是从 public representation 得到的 model floor，不是 profiler 观测的 physical DRAM
@@ -262,34 +331,34 @@ traffic。它不计：
 这些问题需要 NCU 回答。benchmark 不再根据 launcher column tile 推导
 `weight_replay_lower_bound_bytes`。
 
-## 5. 理论计算量
+`1792 GB/s` 仍是固定硬件规格，用于原有 `DRAM_%` 和 fixed-spec roofline。附加的
+`READ_%` 使用 RTX 5090 上 `tools/hbm_bandwidth_probe.cu` 的 4 GiB `uint4` 纯读结果
+`1674.5 GB/s`，表示该机器已经实测可持续的只读上限。它只为读主导 Linear 提供实际
+可达利用率，不替换 fixed-spec 指标，也不改变一遍 logical weight read 的
+`model_bytes` 口径。copy probe 同时读写，不是这类 GEMV 的适用上限。
+
+## 5. 数学工作量与 route-neutral 指标
 
 所有 weight types 使用同一个数学 GEMM 工作量：
 
 ```text
 useful_flops = 2*N*K*T
 useful_TFLOP/s = useful_flops / seconds / 1e12
-bf16_tc_spec_pct = useful_TFLOP/s / 209.5 * 100
 ```
 
 不把 dequantization、bit decode、padding、split-K 重复工作或 tile rounding 加入
 `useful_flops`，也不从 private schedule 推导 `executed_tflops`。这保证不同实现都用同一
 数学工作量比较。
 
-当前所有 suite point 都是 A16，因此 compute 参照使用 RTX 5090 dense BF16 Tensor
-Core `209.5 TFLOP/s`。以后若增加真实 A8/A4 path，必须登记对应的固定硬件规格；不能
-继续套用 BF16 peak，也不能用自建 probe 的实测值替代 datasheet/spec 参照。
-
-统一 roofline 参考为：
+`AllowA4` 是许可而不是 actual activation-compute profile；同一 policy 下不同 exact
+geometry 和 T 可以选择不同 route。因此长期 public benchmark 不输出
+`activation_compute`、`TC_%`、compute roof、`bound` 或组合 roofline，也不通过 policy
+猜测 private resolver。统一保留的固定规格参考只有 memory floor：
 
 ```text
 memory_floor_us = model_bytes / 1792 GB/s
-compute_floor_us = useful_flops / 209.5 TFLOP/s
-roofline_floor_us = max(memory_floor_us, compute_floor_us)
-roofline_efficiency = roofline_floor_us / median_us
+memory_floor_pct = memory_floor_us / median_us
 ```
-
-每个结果同时输出 `memory` 或 `compute` bound。不存在写死的“小 T/大 T”分界。
 
 ## 6. 计时合同
 
@@ -313,7 +382,7 @@ console header 固定打印：
 ```text
 gpu=RTX 5090
 dram_spec=1792 GB/s
-bf16_dense_tc_spec=209.5 TFLOP/s
+sustained_read=1674.5 GB/s
 cache=cold
 ```
 
@@ -321,8 +390,8 @@ cache=cold
 
 ```text
 label qtype policy N K T median_us min_us p95_us
-model_GB effective_GB/s DRAM_%
-useful_TFLOP/s BF16_TC_% bound roofline_%
+model_GB effective_GB/s DRAM_% READ_%
+useful_TFLOP/s memory_floor_pct
 ```
 
 sweep 额外输出相邻 T 的 `delta_%`。CSV 可以增加 weight/x/out byte breakdown、warmup、
@@ -339,34 +408,9 @@ repeat 和环境版本，但不恢复以下字段：
 benchmark 不需要声称选中了哪个 kernel。单点 NCU 可以看到真实 kernel 实例，production
 selector 源码是 host launcher route 的唯一 executable authority。
 
-## 8. 已完成的实现收口
+## 8. 注册规则
 
-旧 `linear_op_bench.cu` 已删除，并移除：
-
-- `--all-targets` 隐式默认行为；
-- LinearAdd、LinearSwiGLU、LinearPair 和 composed control；
-- private fused plan headers；
-- Q4/Q5/Q6/W8 launcher-name、tile、tail 和 MMA row-tile 镜像；
-- stream-copy kernel、copy buffers、`--copy-repeat` 和 `--stream-ceiling-gbs`；
-- Tensor Core peak probe；
-- warm-cache second pass；
-- per-shape default route-boundary T tables；
-- `candidate_name` 和 `kernel_variant` 输出。
-
-当前 `linear_bench.cu` 保留：
-
-- deterministic packed Q4/Q5/Q6/W8 weight generation；
-- BF16 activation/output allocation；
-- public Linear invocation；
-- cold-cache CUDA-event timing；
-- single/sweep/suite/profile mode；
-- compact console/CSV output。
-
-构建 target 是 `ninfer_linear_bench`。旧 `ninfer_linear_op_bench` 不保留兼容别名。
-
-## 9. 注册规则
-
-### 9.1 新 production shape
+### 8.1 新 production shape
 
 新增 production Linear shape 不要求修改 benchmark：
 
@@ -383,29 +427,38 @@ label, qtype, policy, N, K, T class
 不得携带 launcher、schedule、kernel、tile、Full/Predicated、workspace 或 route-boundary
 metadata。
 
-### 9.2 新 route
+### 8.2 新 route
 
 新增或替换 host launcher 不修改 benchmark。single、sweep 和 suite 始终调用 public
 Linear，因此自然测量 selector 当前返回的 production route。
 
-如果需要在 route 入选前比较多个候选，应建立该格式任务范围内的临时测量代码；不得把
-generic candidate forcing、legality registry 或 plan 层重新引入长期 pure Linear
-benchmark。
+候选选择遵循 [`op-development.md`](op-development.md#7-performance-evidence)
+定义的推荐工作流：
 
-### 9.3 新 weight/activation compute type
+1. 在该格式或 route 的开发任务范围内编写临时 benchmark/sweep，必要时直接调用私有
+   launcher；
+2. 在候选共同合法域、相同输入和 cache/timing 条件下确定固定胜者或 crossover；
+3. 将决定只写入 production selector；
+4. 通过 public Linear 重新验证 correctness 和最终性能；
+5. 删除临时 sweep、candidate forcing 和仅为比较保留的私有入口。
+
+不得把 generic candidate forcing、私有合法域、crossover 镜像、launcher catalog 或
+plan 层重新引入长期 pure Linear benchmark。public `--sweep` 只观察最终 selector 的
+整体表现，不承担候选选择。
+
+### 8.3 新 weight/activation compute type
 
 只有同时完成以下事项才增加新的 benchmark type：
 
-1. public policy 对应真实可达的 compute path；
+1. public policy 对应真实可达的 production path；
 2. packed-weight fixture 支持该 persistent format；
 3. model-byte 公式明确；
-4. 对应固定硬件 peak 明确；
-5. public numerical suite 已按该 compute criterion 资格化。
+4. public numerical suite 已按该 policy 下实际可达 routes 资格化。
 
-`AllowA8` 只是许可，不能直接在输出中冒充实际 A8。当前所有预置 suite 必须显式使用
-`A16Only`。
+policy 只是许可，长期 benchmark 不把许可本身冒充为低精度执行。当前所有预置 suite
+显式使用 `A16Only`；NVFP4 AllowA4 保留为数字 geometry 的显式 point。
 
-## 10. 当前验证
+## 9. 当前验证
 
 当前实现已验证：
 
@@ -418,7 +471,29 @@ benchmark。
    `q4_rowsplit_gemv_kernel` 实例；
 6. Q4 `[4096,5120], T=1` 的 weight-byte 结果为 `11141120`，等于
    `4096*5120*(4/8+2/64)`；console 与 CSV 使用同一计算；
-7. 输出固定引用 `1792 GB/s` 和 `209.5 TFLOP/s`，不存在实测 ceiling probe。
+7. 上述 BF16 exact point 通过 public Linear 执行；500 次 cold-cache sample 的 median
+   在重复运行中为 `95.520–97.536 us`，即 `1505.5–1537.3 GB/s`；
+8. 相对 `1674.5 GB/s` 纯读 probe，这一范围为 `89.91%–91.80%` 实际可达读带宽；
+9. final NCU 单次 capture 的 DRAM read 为 `146825728` bytes，而 weight 加 activation
+   的一遍 logical read 为 `146810880` bytes；额外 read 仅 `14848` bytes，没有 weight
+   replay；
+10. 输出保留 route-neutral useful TFLOP/s 和 memory-floor 指标，不从 AllowA4 推断实际
+    activation-compute profile；
+11. 五个 NVFP4 exact problem 的 A4 Linear 都在 `T=17`、代表性 cp.async point 和主要
+    `T=1024` TMA point 直接通过同一个 exact-decode/naive-FP64 oracle；
+12. RTX 5090、CUDA 13.1、cold-cache 下，五个 NVFP4 A4
+    `T=1024` 完整 quantization + GEMM 结果为：
 
-benchmark 不承担数值 correctness；Q4/Q5/Q6/W8 A16 correctness 继续由各自 public
+    | `[N,K]` | Median | Useful throughput | Dense FP4 peak |
+    |---:|---:|---:|---:|
+    | `[14336,5120]` | `152.576 us` | `985.24 TFLOP/s` | `58.79%` |
+    | `[16384,5120]` | `174.784 us` | `982.92 TFLOP/s` | `58.65%` |
+    | `[34816,5120]` | `390.112 us` | `935.81 TFLOP/s` | `55.84%` |
+    | `[5120,6144]` | `72.992 us` | `882.62 TFLOP/s` | `52.66%` |
+    | `[5120,17408]` | `197.888 us` | `922.42 TFLOP/s` | `55.04%` |
+
+    The four previously registered rows retain their 5-warmup/30-sample measurements; the new
+    `[34816,5120]` row uses 5 warmups and 40 samples.
+
+benchmark 不承担数值 correctness；各 weight/activation-compute profile 继续由 public
 Linear conformance suite 和统一 CPU FP64 GEMM oracle 负责。

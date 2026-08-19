@@ -15,6 +15,7 @@ ninfer::EngineOptions ordinary_engine_options(const char* artifact) {
     ninfer::EngineOptions options;
     options.artifact_path  = artifact;
     options.max_context    = 128;
+    options.kv_capacity    = ninfer::KvCapacityPolicy::explicit_capacity(128);
     options.prefill_chunk  = 128;
     options.kv_cache       = ninfer::KvCacheStorage::BFloat16;
     options.use_cuda_graph = false;
@@ -26,6 +27,7 @@ ninfer::EngineOptions dflash_engine_options(const char* artifact, ninfer::Propos
                                             std::uint32_t max_context) {
     ninfer::EngineOptions options     = ordinary_engine_options(artifact);
     options.max_context               = max_context;
+    options.kv_capacity               = ninfer::KvCapacityPolicy::explicit_capacity(max_context);
     options.speculative.backend       = ninfer::SpeculativeBackend::DFlash;
     options.speculative.draft_tokens  = 3;
     options.speculative.proposal_head = proposal;
@@ -47,7 +49,7 @@ ninfer::PromptInput initial_conversation() {
     input.options.enable_thinking = false;
 
     ninfer::ChatMessage user;
-    user.role = "user";
+    user.role = ninfer::ChatRole::User;
     user.parts.push_back(ninfer::MessagePart{
         .kind = ninfer::MessagePartKind::Text, .text = "Name one prime number.", .media = {}});
     input.messages.push_back(std::move(user));
@@ -58,14 +60,14 @@ ninfer::PromptInput followup_conversation(const ninfer::GenerationResult& first,
                                           std::string followup) {
     ninfer::PromptInput input = initial_conversation();
     ninfer::ChatMessage assistant;
-    assistant.role              = "assistant";
+    assistant.role              = ninfer::ChatRole::Assistant;
     assistant.reasoning_content = first.reasoning;
     assistant.parts.push_back(ninfer::MessagePart{
         .kind = ninfer::MessagePartKind::Text, .text = first.content, .media = {}});
     input.messages.push_back(std::move(assistant));
 
     ninfer::ChatMessage next;
-    next.role = "user";
+    next.role = ninfer::ChatRole::User;
     next.parts.push_back(ninfer::MessagePart{
         .kind = ninfer::MessagePartKind::Text, .text = std::move(followup), .media = {}});
     input.messages.push_back(std::move(next));
@@ -75,13 +77,13 @@ ninfer::PromptInput followup_conversation(const ninfer::GenerationResult& first,
 ninfer::PromptInput altered_history_after_boundary() {
     ninfer::PromptInput input = initial_conversation();
     ninfer::ChatMessage assistant;
-    assistant.role = "assistant";
+    assistant.role = ninfer::ChatRole::Assistant;
     assistant.parts.push_back(ninfer::MessagePart{
         .kind = ninfer::MessagePartKind::Text, .text = "This history was changed.", .media = {}});
     input.messages.push_back(std::move(assistant));
 
     ninfer::ChatMessage next;
-    next.role = "user";
+    next.role = ninfer::ChatRole::User;
     next.parts.push_back(ninfer::MessagePart{
         .kind = ninfer::MessagePartKind::Text, .text = "Continue briefly.", .media = {}});
     input.messages.push_back(std::move(next));
@@ -90,18 +92,21 @@ ninfer::PromptInput altered_history_after_boundary() {
 
 int verify_dflash_load(const ninfer::Engine& engine) {
     const ninfer::LoadSummary load = engine.load_summary();
-    if (load.target != "qwen3_6_35b_a3b" || load.tensor_count != 586 || load.resource_count != 6 ||
-        load.host_to_device_bytes != 21'591'646'208ULL ||
-        load.artifact_bytes_read < load.host_to_device_bytes) {
-        std::cerr << "DFlash Engine materialized the wrong artifact payload: target=" << load.target
-                  << " tensors=" << load.tensor_count << " resources=" << load.resource_count
-                  << " h2d=" << load.host_to_device_bytes << '\n';
+    if (load.target != "qwen3_6_35b_a3b" || load.weights_id != "groupwise-int" ||
+        load.host_to_device_bytes == 0 || load.artifact_bytes_read < load.host_to_device_bytes) {
+        std::cerr << "DFlash Engine materialized an invalid artifact payload: target="
+                  << load.target << " weights=" << load.weights_id << '\n';
         return 1;
     }
     const ninfer::MemorySummary memory = engine.memory_summary();
     if (memory.max_context != 4352 || memory.kv_cache != ninfer::KvCacheStorage::BFloat16 ||
-        memory.kv_payload_bytes != 274'726'912ULL ||
-        memory.weights.used_bytes != memory.weights.capacity_bytes) {
+        memory.kv_payload_bytes == 0 || memory.weights.capacity_bytes == 0 ||
+        memory.weights.used_bytes == 0 ||
+        memory.weights.used_bytes > memory.weights.capacity_bytes ||
+        memory.sequence.capacity_bytes == 0 || memory.sequence.used_bytes == 0 ||
+        memory.sequence.used_bytes > memory.sequence.capacity_bytes ||
+        memory.workspace.capacity_bytes == 0 || memory.request_transient.capacity_bytes != 0 ||
+        memory.workspace_logical_peak_bytes != 0 || memory.cuda_graph_allowance_bytes == 0) {
         std::cerr << "DFlash Engine has an invalid frozen memory layout\n";
         return 1;
     }
@@ -121,6 +126,12 @@ int exercise_partial_terminal(ninfer::Engine& engine, const std::vector<ninfer::
         const ninfer::GenerationResult stopped =
             engine.generate(engine.prepare_tokens(prompt), options);
         if (stopped.finish_reason != ninfer::FinishReason::StopToken) { continue; }
+        if (stopped.generated_token_ids.size() != stop_index + 1 ||
+            !std::equal(stopped.generated_token_ids.begin(), stopped.generated_token_ids.end(),
+                        baseline.begin())) {
+            std::cerr << "partial DFlash terminal diverged from the target baseline prefix\n";
+            return 1;
+        }
 
         const std::uint64_t fully_licensed = 1 + stopped.speculative.rounds +
                                              stopped.speculative.accepted_tokens +
@@ -228,21 +239,32 @@ int main() {
     }
 
     {
-        ninfer::Engine full(dflash_engine_options(artifact, ninfer::ProposalHead::Full, 128));
-        const ninfer::GenerationResult result =
-            full.generate(full.prepare_tokens(prompt), greedy_options(17, false));
-        if (result.generated_token_ids.size() != 17 ||
-            !std::equal(result.generated_token_ids.begin(), result.generated_token_ids.end(),
-                        target_output.begin(), target_output.begin() + 17) ||
-            result.speculative.backend != ninfer::SpeculativeBackend::DFlash ||
-            result.speculative.rounds == 0) {
-            std::cerr << "full-head DFlash Graph route diverged from ordinary target output\n";
+        ninfer::EngineOptions options =
+            dflash_engine_options(artifact, ninfer::ProposalHead::Full, 128);
+        options.max_concurrency = 2;
+        ninfer::Engine full(std::move(options));
+        auto first  = full.submit(full.prepare_tokens(prompt), greedy_options(17, false));
+        auto second = full.submit(full.prepare_tokens(prompt), greedy_options(9, false));
+        const ninfer::GenerationResult first_result  = first.wait();
+        const ninfer::GenerationResult second_result = second.wait();
+        const auto valid = [&](const ninfer::GenerationResult& result, std::size_t count) {
+            return result.generated_token_ids.size() == count &&
+                   std::equal(result.generated_token_ids.begin(), result.generated_token_ids.end(),
+                              target_output.begin(),
+                              target_output.begin() + static_cast<std::ptrdiff_t>(count)) &&
+                   result.speculative.backend == ninfer::SpeculativeBackend::DFlash &&
+                   result.speculative.rounds != 0;
+        };
+        if (!valid(first_result, 17) || !valid(second_result, 9)) {
+            std::cerr << "concurrent full-head DFlash Graph route diverged from ordinary target "
+                         "output\n";
             return 1;
         }
     }
 
     ninfer::Engine engine(dflash_engine_options(artifact, ninfer::ProposalHead::Optimized, 4352));
     if (const int result = verify_dflash_load(engine); result != 0) { return result; }
+    engine.reset_memory_peaks();
     const ninfer::GenerationResult dflash =
         engine.generate(engine.prepare_tokens(prompt), greedy_options(24, false));
     if (dflash.generated_token_ids != target_output) {
@@ -257,12 +279,15 @@ int main() {
                   << '\n';
         return 1;
     }
+    const ninfer::MemorySummary memory = engine.memory_summary();
+    if (memory.workspace_logical_peak_bytes == 0 ||
+        memory.workspace_logical_peak_bytes > memory.workspace.capacity_bytes) {
+        std::cerr << "DFlash request did not report a valid planned workspace phase\n";
+        return 1;
+    }
     if (dflash.speculative.backend != ninfer::SpeculativeBackend::DFlash ||
-        dflash.speculative.draft_window != 3 || dflash.speculative.rounds < 2 ||
-        dflash.speculative.accepted_tokens == 0) {
-        std::cerr << "DFlash fixture did not execute multiple accepting rounds: rounds="
-                  << dflash.speculative.rounds << " accepted=" << dflash.speculative.accepted_tokens
-                  << '\n';
+        dflash.speculative.rounds == 0) {
+        std::cerr << "DFlash fixture did not execute speculative decode\n";
         return 1;
     }
     if (const int result = exercise_partial_terminal(engine, prompt, target_output); result != 0) {

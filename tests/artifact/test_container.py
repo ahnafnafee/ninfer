@@ -11,6 +11,7 @@ from tools.artifact.container import (
     PREFIX,
     Artifact,
     ArtifactError,
+    ArtifactIdentity,
     ResourceSpec,
     TensorSpec,
     write_artifact,
@@ -29,6 +30,18 @@ def _small_specs():
         TensorSpec("quant/q5", (1, 64), "Q5G64_F16S", "row-split-k128-v1"),
         TensorSpec("quant/q6", (1, 64), "Q6G64_F16S", "row-split-k128-v1"),
         TensorSpec("quant/w8", (1, 32), "W8G32_F16S", "row-split-k128-v1"),
+        TensorSpec(
+            "quant/nvfp4",
+            (128, 64),
+            "NVFP4",
+            "blockscale-k16-m128x4-v1",
+        ),
+        TensorSpec(
+            "quant/fp8_row",
+            (2, 4),
+            "FP8_E4M3FN_ROW_BF16S",
+            "row-scale-v1",
+        ),
     ]
 
 
@@ -39,11 +52,12 @@ def _payload(spec):
     return bytes(size)
 
 
-def test_v1_round_trip_covers_every_registered_storage(tmp_path):
+def test_v2_round_trip_covers_every_registered_storage(tmp_path):
     path = tmp_path / "small.ninfer"
     specs = _small_specs()
     entries = [(spec, _payload(spec)) for spec in specs]
-    planned = write_artifact(path, "test-model", entries)
+    identity = ArtifactIdentity("test-model", "test-weights")
+    planned = write_artifact(path, identity, entries)
 
     prefix = path.read_bytes()[: PREFIX.size]
     magic, json_bytes = PREFIX.unpack(prefix)
@@ -51,13 +65,15 @@ def test_v1_round_trip_covers_every_registered_storage(tmp_path):
     assert prefix[8:] == struct.pack("<Q", json_bytes)
 
     with Artifact.open(path) as artifact:
-        assert artifact.model_id == "test-model"
+        assert artifact.identity == identity
         assert artifact.payload_offset == align_up(PREFIX.size + json_bytes, PAYLOAD_ALIGNMENT)
         assert artifact.objects == planned
         for spec, expected in entries:
             assert bytes(artifact.payload(spec.name)) == expected
         summary = artifact_summary(artifact)
-        assert summary["objects"] == 8
+        assert summary["model_id"] == "test-model"
+        assert summary["weights_id"] == "test-weights"
+        assert summary["objects"] == 10
         assert summary["formats"] == {
             "BF16": 1,
             "FP32": 1,
@@ -66,14 +82,22 @@ def test_v1_round_trip_covers_every_registered_storage(tmp_path):
             "Q5G64_F16S": 1,
             "Q6G64_F16S": 1,
             "W8G32_F16S": 1,
+            "NVFP4": 1,
+            "FP8_E4M3FN_ROW_BF16S": 1,
         }
 
 
-def _write_raw(path, metadata: dict[str, object], payload: bytes = b"") -> None:
+def _write_raw(
+    path,
+    metadata: dict[str, object],
+    payload: bytes = b"",
+    *,
+    magic: bytes = MAGIC,
+) -> None:
     encoded = json.dumps(metadata, separators=(",", ":")).encode("utf-8")
     payload_offset = align_up(PREFIX.size + len(encoded), PAYLOAD_ALIGNMENT)
     path.write_bytes(
-        PREFIX.pack(MAGIC, len(encoded))
+        PREFIX.pack(magic, len(encoded))
         + encoded
         + bytes(payload_offset - PREFIX.size - len(encoded))
         + payload
@@ -88,7 +112,10 @@ def test_reader_rejects_invalid_framing_schema_and_geometry(tmp_path):
         Artifact.open(path)
 
     root = {
-        "model_id": "test-model",
+        "identity": {
+            "model_id": "test-model",
+            "weights_id": "test-weights",
+        },
         "objects": [
             {
                 "name": "a",
@@ -118,7 +145,10 @@ def test_reader_rejects_invalid_framing_schema_and_geometry(tmp_path):
         Artifact.open(path)
 
     root = {
-        "model_id": "test-model",
+        "identity": {
+            "model_id": "test-model",
+            "weights_id": "test-weights",
+        },
         "objects": [
             {
                 "name": "bad-size",
@@ -133,4 +163,18 @@ def test_reader_rejects_invalid_framing_schema_and_geometry(tmp_path):
     }
     _write_raw(path, root, b"\x00" * 2)
     with pytest.raises(ArtifactError, match="layout requires"):
+        Artifact.open(path)
+
+
+def test_reader_rejects_v1_with_the_migration_command(tmp_path):
+    path = tmp_path / "legacy.ninfer"
+    _write_raw(
+        path,
+        {"model_id": "test-model", "objects": [{"unused": True}]},
+        magic=b"NINFER\x00\x01",
+    )
+    with pytest.raises(
+        ArtifactError,
+        match=r"python3 -m tools\.artifact\.migrate_v1_to_v2 <artifact>",
+    ):
         Artifact.open(path)
