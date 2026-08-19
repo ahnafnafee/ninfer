@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ninfer-switch 27b|38|35b|kill   -- swap model or shut down on port 9011
+# ninfer-switch 27b|38|38u|35b|kill   -- swap model or shut down on port 9011
 set -eu
 
 PORT=9011
@@ -7,6 +7,7 @@ PORT=9011
 case "${1:-}" in
   27b) ART=qwen3_6_27b.ninfer;      ID=qwen3.6-27b ;;
   38)  ART=qwen3_8_27b.ninfer;      ID=qwen3.8-27b ;;
+  38u) ART=qwen3_8_27b_uncensored.ninfer; ID=qwen3.8-27b-heretic ;;
   35b) ART=qwen3_6_35b_a3b.ninfer;  ID=qwen3.6-35b-a3b ;;
   kill)
     p=$(ps -eo pid,comm --no-headers | awk '$2=="ninfer-serve"{print $1}')
@@ -19,7 +20,7 @@ case "${1:-}" in
     fi
     exit 0
     ;;
-  *) echo "usage: ninfer-switch 27b|38|35b|kill"; exit 1 ;;
+  *) echo "usage: ninfer-switch 27b|38|38u|35b|kill"; exit 1 ;;
 esac
 
 p=$(ps -eo pid,comm --no-headers | awk '$2=="ninfer-serve"{print $1}')
