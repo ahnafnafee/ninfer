@@ -302,17 +302,20 @@ state, and function calls) plus Anthropic Messages, token counting, and multimod
 ### Switching models or shutting down
 
 NInfer loads one model per process; there is no runtime hot-swap. For local development on WSL,
-the [`tools/ninfer-switch`](tools/ninfer-switch) script handles the stop-and-restart cycle:
+the [`tools/ninfer-switch`](tools/ninfer-switch) script handles the swap:
 
 ```bash
-wsl ~/bin/ninfer-switch 27b    # switch to Qwen3.6-27B
-wsl ~/bin/ninfer-switch 35b    # switch to Qwen3.6-35B-A3B
-wsl ~/bin/ninfer-switch kill   # shut down the server
+wsl ~/bin/ninfer-switch 27b     # switch to Qwen3.6-27B
+wsl ~/bin/ninfer-switch 35b     # switch to Qwen3.6-35B-A3B
+wsl ~/bin/ninfer-switch status  # report unit state, artifact, served model id, port, and GPU
+wsl ~/bin/ninfer-switch kill    # shut down the server
 ```
 
-It kills the running `ninfer-serve`, waits for the port to free, and starts the new model on
-port 9011 with the same tuning (MTP speculative decoding, INT8 KV cache, full context). Copy or
-symlink `tools/ninfer-switch` into your `~/bin/` for convenience.
+It restarts a `ninfer-serve` systemd user unit rather than starting its own process, and records
+the selection in the unit's `EnvironmentFile` so it survives restarts and reboots. The unit serves
+on port 18020, and its own `ExecStart` owns the serving options. Selector names and the artifacts
+they choose are defined in the script; copy or symlink `tools/ninfer-switch` into your `~/bin/` for
+convenience.
 
 ## Capabilities
 

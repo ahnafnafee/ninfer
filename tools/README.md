@@ -96,20 +96,6 @@ python3 -m tools.smoke.serve_contract \
 The client exercises OpenAI, Anthropic, streaming, usage, multimodal, and tool-call response
 surfaces against the resident process.
 
-## Server switching
-
-`ninfer-switch` is a bash utility for local development that stops the current `ninfer-serve`
-process and starts a new one with a different model on port 9011:
-
-```bash
-wsl ~/bin/ninfer-switch 27b    # switch to Qwen3.6-27B
-wsl ~/bin/ninfer-switch 35b    # switch to Qwen3.6-35B-A3B
-wsl ~/bin/ninfer-switch kill   # shut down the server
-```
-
-It requires the WSL environment where `ninfer-serve`, the model artifacts under `~/models/`, and
-`LD_LIBRARY_PATH=~/lib` are set up. The repo copy under `tools/` is the source of truth; symlink or
-copy it into `~/bin/` for convenience.
 For typed rewrite-checkpoint and thinking-history behavior, the managed smoke script launches a
 real server and consumes the repository fixture:
 
@@ -117,3 +103,22 @@ real server and consumes the repository fixture:
 python3 tools/smoke/serve_thinking_preservation.py \
   --artifact out/qwen3_6_27b.ninfer --backend mtp
 ```
+
+## Server switching
+
+`ninfer-switch` is a bash utility for local development that restarts the `ninfer-serve` systemd
+user unit against a different artifact on port 18020:
+
+```bash
+wsl ~/bin/ninfer-switch 27b     # switch to Qwen3.6-27B
+wsl ~/bin/ninfer-switch 35b     # switch to Qwen3.6-35B-A3B
+wsl ~/bin/ninfer-switch status  # report unit state, artifact, served model id, port, and GPU
+wsl ~/bin/ninfer-switch kill    # shut down the server
+```
+
+The chosen artifact and model id are written to the unit's `EnvironmentFile`
+(`~/.config/ninfer/model.env`), so the selection survives restarts and reboots; the selector names
+and the artifacts they choose are defined in the script. It requires the WSL environment where a
+`ninfer-serve` user unit, the model artifacts under `~/models/`, and `LD_LIBRARY_PATH=~/lib` are
+set up. The repo copy under `tools/` is the source of truth; symlink or copy it into `~/bin/` for
+convenience.
