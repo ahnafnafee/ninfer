@@ -59,10 +59,10 @@ report_status() {
 }
 
 case "${1:-}" in
-  27b) ART="$HOME/models/qwen3_6_27b.ninfer";            ID=qwen3.6-27b ;;
-  38)  ART="$HOME/models/qwen3_8_27b.ninfer";            ID=qwen3.8-27b ;;
-  38u) ART="$HOME/models/qwen3_8_27b_uncensored.ninfer"; ID=qwen3.8-27b-heretic ;;
-  35b) ART="$HOME/models/qwen3_6_35b_a3b.ninfer";        ID=qwen3.6-35b-a3b ;;
+  27b) ART="$HOME/models/qwen3_6_27b.ninfer";                ID=qwen3.6-27b ;;
+  38)  ART="$HOME/models/qwen3_8_27b.ninfer";                ID=qwen3.8-27b ;;
+  38u) ART="$HOME/models/qwen3_8_27b_hauhaucs_nvfp4.ninfer"; ID=qwen3.8-27b-hauhaucs ;;
+  35b) ART="$HOME/models/qwen3_6_35b_a3b.ninfer";            ID=qwen3.6-35b-a3b ;;
   status)
     report_status
     exit 0
