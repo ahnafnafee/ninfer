@@ -2,8 +2,8 @@
 
 `eval/` contains the repository-local capability evaluation coordinator. It can evaluate this
 project's server, another local OpenAI-compatible service, or a remote online model. The inference
-engine is only one possible target; its single-sequence limitation is represented by
-`max_concurrency: 1`, not built into the framework.
+engine is only one possible target; each target and job declares the concurrency admitted by that
+particular server run instead of baking an Engine policy into the framework.
 
 EvalScope is the first real evaluation backend. The coordinator, configuration, logging, progress,
 resume, and result contracts do not import or depend on EvalScope. The deterministic `mock` backend
@@ -28,6 +28,13 @@ Qwen model or create a `.ninfer` artifact.
 See [`configs/capability-suite.yaml`](configs/capability-suite.yaml) for the initial AIME25,
 AIME26, GPQA-Diamond, and BFCL-v4 suites, and [`configs/mock-suite.yaml`](configs/mock-suite.yaml)
 for a network-free example.
+
+The published Qwen3.6 reasoning runs retain their exact configurations in
+[`configs/qwen3_6_27b_reasoning.yaml`](configs/qwen3_6_27b_reasoning.yaml),
+[`configs/qwen3_6_35b_aime.yaml`](configs/qwen3_6_35b_aime.yaml), and
+[`configs/qwen3_6_35b_gpqa.yaml`](configs/qwen3_6_35b_gpqa.yaml). The Qwen3.8 groupwise-int and
+NVFP4 campaigns use their format-specific reasoning configurations and managed scripts documented
+below.
 
 [`configs/qwen3_6_35b_needle_haystack.yaml`](configs/qwen3_6_35b_needle_haystack.yaml)
 defines the 35B-A3B Needle-in-a-Haystack profiles separately: `standard` preserves EvalScope's
@@ -62,8 +69,9 @@ Concurrency has two levels:
 - optional job `max_concurrency` caps how many target slots one job may reserve.
 
 For EvalScope, the granted job slots become `eval_batch_size`. Multiple jobs sharing a target can
-never reserve more slots than the target capacity. Set the local `ninfer-serve` target to one; set a
-larger explicit value for an online service that supports it.
+never reserve more slots than the target capacity. For `ninfer-serve`, match the target capacity to
+the server's startup `--max-concurrency`; an individual long-output job may set a lower concurrency
+when its KV entitlement requires it.
 
 Portable generation settings live under `generation`. Evaluator-specific controls live under
 `backend_args`; unknown fields are rejected rather than silently ignored.
@@ -166,6 +174,22 @@ and `eval/runs/20260818T223812Z-da6cdbce`):
 | GPQA-Diamond | 90.40% | 179 / 198 |
 | ERQA | 66.25% | 265 / 400 |
 | RealWorldQA | 83.53% | 639 / 765 |
+
+The Qwen3.8-27B groupwise-int profile runs the same protocol through
+`eval/run_qwen3_8_27b_groupwise_reasoning.sh`. Its 16.96 GiB artifact leaves more GPU memory, so the
+text step uses the full 262,144-token context and both steps run at concurrency four (run
+directories `eval/runs/20260819T031655Z-078bd8e0` and `eval/runs/20260819T141750Z-531a236a`; the
+multimodal step was resumed with `ninfer_eval resume` after a local proxy change interrupted
+RealWorldQA at 618/765 samples):
+
+| Benchmark | Accuracy | Correct / total |
+|---|---:|---:|
+| IFBench (prompt-level strict) | 77.67% | 233 / 300 |
+| AIME 2025 | 96.67% | 29 / 30 |
+| AIME 2026 | 96.67% | 29 / 30 |
+| GPQA-Diamond | 87.37% | 173 / 198 |
+| ERQA | 66.25% | 265 / 400 |
+| RealWorldQA | 82.22% | 629 / 765 |
 
 Prepare and inspect Needle-in-a-Haystack without issuing model requests:
 
